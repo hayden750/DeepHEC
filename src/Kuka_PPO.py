@@ -33,7 +33,6 @@ class KukaPPOAgent:
         self.lower_bound = lower_bound
         self.train_step = 0
         self.done_ep = False
-        self.ep_count = 0
 
         self.start_episode = 0
         self.reward_list = []
@@ -56,16 +55,12 @@ class KukaPPOAgent:
 
     def experience_replay(self):
         if self.done_ep:
-            self.ep_count += 1
-            if self.ep_count % 5 == 0:
-                s_batch, a_batch, r_batch, ns_batch, d_batch = self.buffer.sample()
-                returns, advantages = self.compute_advantages(r_batch, s_batch, ns_batch, d_batch)
-                actor_loss = self.actor.train(s_batch, advantages)
-                critic_loss = self.critic.train(s_batch, returns)
-                self.buffer.buffer.clear()
-                return actor_loss, critic_loss
-            else:
-                return 0, 0
+            s_batch, a_batch, r_batch, ns_batch, d_batch = self.buffer.sample()
+            returns, advantages = self.compute_advantages(r_batch, s_batch, ns_batch, d_batch)
+            actor_loss = self.actor.train(s_batch, advantages)
+            critic_loss = self.critic.train(s_batch, returns)
+            self.buffer.buffer.clear()
+            return actor_loss, critic_loss
         else:
             return 0, 0
 
