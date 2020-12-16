@@ -13,7 +13,7 @@ import tensorflow.keras.backend as K
 import pickle
 
 
-class KukaPPOAgent:
+class KukaPPOAgent2:
     def __init__(self, state_size, action_size,
                  lr_a, lr_c,
                  batch_size,
@@ -35,7 +35,7 @@ class KukaPPOAgent:
 
         self.done_ep = False
         self.ep_count = 0
-        self.update_rate = 30
+        self.update_rate = 15
 
         self.start_episode = 0
         self.reward_list = []
@@ -61,11 +61,34 @@ class KukaPPOAgent:
         if self.done_ep:
             self.ep_count += 1
             if self.ep_count % self.update_rate == 0:
-                print("Updating policy...")
-                s_batch, a_batch, r_batch, ns_batch, d_batch = self.buffer.sample()
+                s_batch = []
+                a_batch = []
+                r_batch = []
+                ns_batch = []
+                d_batch = []
+                for i in range(len(self.buffer.buffer)):
+                    s_batch.append(self.buffer.buffer[i][0])
+                    a_batch.append(self.buffer.buffer[i][1])
+                    r_batch.append(self.buffer.buffer[i][2])
+                    ns_batch.append(self.buffer.buffer[i][3])
+                    d_batch.append(self.buffer.buffer[i][4])
                 returns, advantages = self.compute_advantages(r_batch, s_batch, ns_batch, d_batch)
-                actor_loss = self.actor.train(s_batch, advantages)
-                critic_loss = self.critic.train(s_batch, returns)
+                print("Updating policy...")
+                n_sample = self.buffer.buffer_capacity // self.batch_size
+                idx = np.arange(self.buffer.buffer_capacity)
+                np.random.shuffle(idx)
+                for epoch in range(10):
+                    for b in range(n_sample):
+                        ind = idx[b * self.batch_size:(b + 1) * self.batch_size]
+                        g = np.asarray(advantages[ind])
+                        tv = np.asarray(returns)[ind]
+                        actions = np.asarray(a_batch)[ind]
+
+                        action_est = self.actor.model(np.asarray(s_batch)[ind])
+                        values = self.critic.model(np.asarray(s_batch)[ind])
+
+                        actor_loss = self.actor.train(action_est, actions, g)
+                        critic_loss = self.critic.train(values, tv)
                 self.buffer.buffer.clear()
                 return actor_loss, critic_loss
             else:
@@ -162,20 +185,20 @@ class PPOActor:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, s_batch, advantages):
+    def train(self, actions_est, actions, advantages):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             actor_weights = self.model.trainable_variables
-            actor_policy = self.model([s_batch])
-            actor_policy_old = self.model_old([s_batch])
-            ratio = (actor_policy + 1e-9) / (actor_policy_old + 1e-9)
+            # actor_policy = self.model([s_batch])
+            # actor_policy_old = self.model_old([s_batch])
+            ratio = (actions_est + 1e-9) / (actions + 1e-9)
             # ratio = K.exp(K.log(actor_policy + 1e-8) - K.log(actor_policy_old + 1e-8))
             p1 = ratio * advantages
             p2 = K.clip(ratio, min_value=1 - self.epsilon, max_value=1 + self.epsilon) * advantages
             actor_loss = -K.mean(K.minimum(p1, p2))
 
         actor_grad = tape.gradient(actor_loss, actor_weights)
-        self.model_old = self.model
+        # self.model_old = self.model
         self.optimizer.apply_gradients(zip(actor_grad, actor_weights))
         return actor_loss
 
@@ -215,12 +238,12 @@ class PPOCritic:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, states, returns):
+    def train(self, values, returns):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            critic_value = self.model([states])
-            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
+            # critic_value = self.model([states])
+            critic_loss = tf.math.reduce_mean(tf.square(values - returns))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
