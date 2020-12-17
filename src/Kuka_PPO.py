@@ -66,6 +66,7 @@ class KukaPPOAgent:
 
     # Not technically EP, just named so it runs in main
     def experience_replay(self):
+        actor_loss, critic_loss = 0, 0
         if self.done_ep:
             self.ep_count += 1
             if self.ep_count % self.update_rate == 0:
@@ -76,11 +77,7 @@ class KukaPPOAgent:
                 critic_loss = self.critic.train(s_batch, returns)
                 self.buffer.buffer.clear()
                 self.buffer.size = 0
-                return actor_loss, critic_loss
-            else:
-                return 0, 0
-        else:
-            return 0, 0
+        return actor_loss, critic_loss
 
     def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
         values = self.critic.model([s_batch])

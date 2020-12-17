@@ -69,6 +69,7 @@ class KukaPPOAgent2:
         actor_loss, critic_loss = 0, 0
         self.t_step += 1
         if self.t_step % self.t_max == 0:
+            print("Updating policy...")
             s_batch = []
             a_batch = []
             r_batch = []
@@ -91,7 +92,6 @@ class KukaPPOAgent2:
             n_sample = self.buffer.size // self.batch_size
             idx = np.arange(self.buffer.size)
             np.random.shuffle(idx)
-            print("Updating policy...")
             for epoch in range(10):
                 for b in range(n_sample):
                     ind = idx[b * self.batch_size:(b + 1) * self.batch_size]

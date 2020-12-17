@@ -31,7 +31,7 @@ if __name__ == "__main__":
         "This program requires Tensorflow 2.0 or above"
     #######################################
 
-    #######################################
+    ######################################
     # avoid CUDNN_STATUS_INTERNAL_ERROR
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
@@ -41,7 +41,7 @@ if __name__ == "__main__":
         except RuntimeError as e:
             print(e)
     ################################################
-    device_name = tf.test.gpu_device_name()
+    # device_name = tf.test.gpu_device_name()
     # if device_name != '/device:GPU:0':
     #     raise SystemError('GPU device not found')
     # print('Found GPU at: {}'.format(device_name))
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     ######################
     # Hyper-parameters
     ######################
-    MAX_EPISODES = 2000
+    MAX_EPISODES = 10000
 
     LR_A = 0.001
     LR_C = 0.002
@@ -147,6 +147,7 @@ if __name__ == "__main__":
     avg_reward_list = []
     best_score = - np.inf
     start_episode = agent.start_episode
+    rand_eps = 15  # Just explore for a little bit at start
     for episode in range(start_episode, MAX_EPISODES):
         agent.done_ep = False
         obsv = env.reset()
@@ -155,7 +156,6 @@ if __name__ == "__main__":
         frames = []
         ep_frames = []
         step = 0
-        rand_eps = 25  # Just explore for a little bit at start
         while True:
             # if episode % 100 == 0:
             #     ep_frames.append(env.render(mode='rgb_array'))
@@ -195,12 +195,13 @@ if __name__ == "__main__":
             # update the target model
             agent.update_targets()
 
-            with train_summary_writer.as_default():
-                tf.summary.scalar('actor_loss', actor_loss, step=episode)
-                tf.summary.scalar('critic_loss', critic_loss, step=episode)
-            # with graph_summary_writer.as_default():
-            #     tf.summary.trace_export(name="update_target", step=episode,
-            #                             profiler_outdir=graph_log_dir)
+            if actor_loss != 0 and critic_loss != 0:
+                with train_summary_writer.as_default():
+                    tf.summary.scalar('actor_loss', actor_loss, step=episode)
+                    tf.summary.scalar('critic_loss', critic_loss, step=episode)
+                # with graph_summary_writer.as_default():
+                #     tf.summary.trace_export(name="update_target", step=episode,
+                #                             profiler_outdir=graph_log_dir)
 
             state = next_state
             step += 1
