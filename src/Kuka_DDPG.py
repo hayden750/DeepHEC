@@ -30,7 +30,7 @@ class KukaDDPGAgent:
         self.gamma = gamma
         self.upper_bound = upper_bound
         self.lower_bound = lower_bound
-        self.done_ep = False
+        self.done_ep = False  # Not used here
 
         self.start_episode = 0
         self.reward_list = []

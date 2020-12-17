@@ -34,7 +34,7 @@ class KukaTD3Agent:
         self.train_step = 0
         self.actor_loss = 0
         self.policy_decay = 2
-        self.done_ep = False
+        self.done_ep = False  # Not used here
 
         self.start_episode = 0
         self.reward_list = []

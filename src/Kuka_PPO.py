@@ -1,4 +1,12 @@
-''' PPO Implementation with Actor-Critic '''
+''' PPO Implementation with Actor-Critic
+    based on the algorithm set out by OpenAI
+    https://spinningup.openai.com/en/latest/algorithms/ppo.html '''
+
+# This PPO implementation runs k number of episodes
+# on a single policy and stores the experience in
+# a temporary buffer. The policy is then updated
+# a single time from a random sample from the buffer.
+# The buffer is then cleared and the process repeats.
 
 from Replay_Buffer import Buffer
 from FeatureNet import FeatureNetwork
@@ -35,7 +43,7 @@ class KukaPPOAgent:
 
         self.done_ep = False
         self.ep_count = 0
-        self.update_rate = 30
+        self.update_rate = 10
 
         self.start_episode = 0
         self.reward_list = []
@@ -67,6 +75,7 @@ class KukaPPOAgent:
                 actor_loss = self.actor.train(s_batch, advantages)
                 critic_loss = self.critic.train(s_batch, returns)
                 self.buffer.buffer.clear()
+                self.buffer.size = 0
                 return actor_loss, critic_loss
             else:
                 return 0, 0

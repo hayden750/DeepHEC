@@ -16,6 +16,7 @@ from Kuka_DDPG import KukaDDPGAgent
 from Kuka_TD_DDPG import KukaTD3Agent
 # PPO Agent
 from Kuka_PPO import KukaPPOAgent
+from Kuka_PPO2 import KukaPPOAgent2
 
 
 if __name__ == "__main__":
@@ -131,7 +132,12 @@ if __name__ == "__main__":
     #                  'ep_reward_list')
     # print("Success!")
 
-    agent = KukaPPOAgent(state_size, action_size,
+    # agent = KukaPPOAgent(state_size, action_size,
+    #                      LR_A, LR_C, BATCH_SIZE,
+    #                      MEMORY_CAPACITY, 0.95, 0.2,
+    #                      GAMMA, upper_bound, lower_bound)
+
+    agent = KukaPPOAgent2(state_size, action_size,
                          LR_A, LR_C, BATCH_SIZE,
                          MEMORY_CAPACITY, 0.95, 0.2,
                          GAMMA, upper_bound, lower_bound)

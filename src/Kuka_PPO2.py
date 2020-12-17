@@ -1,4 +1,12 @@
-''' PPO Implementation with Actor-Critic '''
+''' PPO Implementation with Actor-Critic
+    based off the implementation from
+    https://github.com/mahyaret/kuka_rl '''
+
+# This PPO implementation runs tmax timesteps on current policy
+# and stores the trajectories into a temporary buffer.
+# This buffer is then sampled into b batches, which
+# are used to update the policy b times before the buffer
+# is cleared. This process is then repeated until finish.
 
 from Replay_Buffer import Buffer
 from FeatureNet import FeatureNetwork
@@ -33,9 +41,9 @@ class KukaPPOAgent2:
         self.lower_bound = lower_bound
         self.train_step = 0
 
-        self.done_ep = False
-        self.ep_count = 0
-        self.update_rate = 15
+        self.done_ep = False  # Not used here
+        self.t_step = 0
+        self.t_max = 1000  # Number of timesteps before policy update
 
         self.start_episode = 0
         self.reward_list = []
@@ -58,53 +66,67 @@ class KukaPPOAgent2:
 
     # Not technically EP, just named so it runs in main
     def experience_replay(self):
-        if self.done_ep:
-            self.ep_count += 1
-            if self.ep_count % self.update_rate == 0:
-                s_batch = []
-                a_batch = []
-                r_batch = []
-                ns_batch = []
-                d_batch = []
-                for i in range(len(self.buffer.buffer)):
-                    s_batch.append(self.buffer.buffer[i][0])
-                    a_batch.append(self.buffer.buffer[i][1])
-                    r_batch.append(self.buffer.buffer[i][2])
-                    ns_batch.append(self.buffer.buffer[i][3])
-                    d_batch.append(self.buffer.buffer[i][4])
-                returns, advantages = self.compute_advantages(r_batch, s_batch, ns_batch, d_batch)
-                print("Updating policy...")
-                n_sample = self.buffer.buffer_capacity // self.batch_size
-                idx = np.arange(self.buffer.buffer_capacity)
-                np.random.shuffle(idx)
-                for epoch in range(10):
-                    for b in range(n_sample):
-                        ind = idx[b * self.batch_size:(b + 1) * self.batch_size]
-                        g = np.asarray(advantages[ind])
-                        tv = np.asarray(returns)[ind]
-                        actions = np.asarray(a_batch)[ind]
+        actor_loss, critic_loss = 0, 0
+        self.t_step += 1
+        if self.t_step % self.t_max == 0:
+            s_batch = []
+            a_batch = []
+            r_batch = []
+            # ns_batch = []
+            d_batch = []
+            for i in range(len(self.buffer.buffer)):
+                s_batch.append(self.buffer.buffer[i][0])
+                a_batch.append(self.buffer.buffer[i][1])
+                r_batch.append(self.buffer.buffer[i][2])
+                # ns_batch.append(self.buffer.buffer[i][3])
+                d_batch.append(self.buffer.buffer[i][4])
 
-                        action_est = self.actor.model(np.asarray(s_batch)[ind])
-                        values = self.critic.model(np.asarray(s_batch)[ind])
+            s_batch = tf.convert_to_tensor(s_batch, dtype=tf.float32)
+            a_batch = tf.convert_to_tensor(a_batch, dtype=tf.float32)
+            r_batch = tf.convert_to_tensor(r_batch, dtype=tf.float32)
+            # ns_batch = tf.convert_to_tensor(ns_batch, dtype=tf.float32)
+            d_batch = tf.convert_to_tensor(d_batch, dtype=tf.float32)
 
-                        actor_loss = self.actor.train(action_est, actions, g)
-                        critic_loss = self.critic.train(values, tv)
-                self.buffer.buffer.clear()
-                return actor_loss, critic_loss
-            else:
-                return 0, 0
-        else:
-            return 0, 0
+            returns, advantages = self.compute_advantages(r_batch, s_batch, d_batch)
+            n_sample = self.buffer.size // self.batch_size
+            idx = np.arange(self.buffer.size)
+            np.random.shuffle(idx)
+            print("Updating policy...")
+            for epoch in range(10):
+                for b in range(n_sample):
+                    ind = idx[b * self.batch_size:(b + 1) * self.batch_size]
+                    g = np.asarray(advantages)[ind]
+                    tv = np.asarray(returns)[ind]
+                    actions = np.asarray(a_batch)[ind]
 
-    def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
-        values = self.critic.model([s_batch])
-        ns_values = self.critic.model([ns_batch])
+                    # action_est = self.actor.model(np.asarray(s_batch)[ind])
+                    # values = self.critic.model(np.asarray(s_batch)[ind])
+
+                    actor_loss = self.actor.train(np.asarray(s_batch)[ind], actions, g)
+                    critic_loss = self.critic.train(np.asarray(s_batch)[ind], tv)
+            self.buffer.buffer.clear()
+            self.buffer.size = 0
+        return actor_loss, critic_loss
+
+    def compute_advantages(self, r_batch, s_batch, d_batch):
+        values = self.critic.model(s_batch)
         returns = []
         gae = 0
+
+        TAU = 0.95
+        discount = 0.99
+        values_next = values[-1]
+        # returns_current = values[-1]
+
         for i in reversed(range(len(r_batch))):
-            delta = r_batch[i] + self.gamma * ns_values[i] * (1 - d_batch[i]) - values[i]
-            gae = delta + self.gamma * self.lmbda * (1 - d_batch[i]) * gae
-            returns.insert(0, gae + values[i])
+            values_current = values[i]
+            rewards_current = r_batch[i]
+
+            gamma = discount * (1. - d_batch[i])
+
+            delta = rewards_current + gamma * values_next - values_current
+            gae = delta + gamma * TAU * gae
+            returns.insert(0, gae + values_current)
 
         adv = np.array(returns) - values
         return returns, (adv - np.mean(adv)) / (np.std(adv) + 1e-10)
@@ -185,11 +207,11 @@ class PPOActor:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, actions_est, actions, advantages):
+    def train(self, states, actions, advantages):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             actor_weights = self.model.trainable_variables
-            # actor_policy = self.model([s_batch])
+            actions_est = self.model(states)
             # actor_policy_old = self.model_old([s_batch])
             ratio = (actions_est + 1e-9) / (actions + 1e-9)
             # ratio = K.exp(K.log(actor_policy + 1e-8) - K.log(actor_policy_old + 1e-8))
@@ -238,11 +260,11 @@ class PPOCritic:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, values, returns):
+    def train(self, states, returns):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            # critic_value = self.model([states])
+            values = self.model(states)
             critic_loss = tf.math.reduce_mean(tf.square(values - returns))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
