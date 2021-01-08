@@ -61,7 +61,9 @@ class KukaPPOAgent:
 
     def policy(self, state):
         # Get action
-        action = tf.squeeze(self.actor.model(state))
+        tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        action = tf.squeeze(self.actor.model(tf_state))
+        action = action.numpy()
         return action
 
     # Not technically EP, just named so it runs in main

@@ -10,13 +10,17 @@ import utils
 
 # Import agent classes
 # DDPG Agent
-# from Kuka_ActorCriticDDPG import KukaActorCriticAgent
 from Kuka_DDPG import KukaDDPGAgent
 # TD3 Agent
 from Kuka_TD_DDPG import KukaTD3Agent
+# DDPG HER Agent
+from Kuka_DDPG_HER import KukaDDPGHERAgent
+# TD3 HER Agent
+from Kuka_TD3_HER import KukaTD3HERAgent
 # PPO Agent
-from Kuka_PPO import KukaPPOAgent
+# from Kuka_PPO import KukaPPOAgent
 from Kuka_PPO2 import KukaPPOAgent2
+from Kuka_PPO3 import KukaPPOAgent
 
 
 if __name__ == "__main__":
@@ -72,7 +76,7 @@ if __name__ == "__main__":
     ######################
     # Hyper-parameters
     ######################
-    MAX_EPISODES = 10000
+    MAX_EPISODES = 20000
 
     LR_A = 0.001
     LR_C = 0.002
@@ -97,17 +101,6 @@ if __name__ == "__main__":
     print('Action_size: ', action_size)
 
     # Create a Kuka Actor-Critic Agent
-    # agent = KukaActorCriticAgent(state_size, action_size,
-    #                              replacement, LR_A, LR_C,
-    #                              BATCH_SIZE,
-    #                              MEMORY_CAPACITY,
-    #                              GAMMA,
-    #                              upper_bound, lower_bound)
-    # Load saved models
-    # print("Loading saved models...")
-    # agent.actor.load_weights('kuka_actor_weights.h5')
-    # agent.critic.load_weights('kuka_critic_weights.h5')
-    # print("Success")
 
     # agent = KukaDDPGAgent(state_size, action_size,
     #                       replacement, LR_A, LR_C,
@@ -123,6 +116,28 @@ if __name__ == "__main__":
     #                      GAMMA,
     #                      upper_bound, lower_bound, noise_clip)
 
+    _HER = False
+    # _HER = True
+    # agent = KukaTD3HERAgent(state_size, action_size,
+    #                          replacement, LR_A, LR_C,
+    #                          BATCH_SIZE,
+    #                          MEMORY_CAPACITY,
+    #                          GAMMA,
+    #                          upper_bound, lower_bound, noise_clip)
+
+    lmdba = 0.95
+    epsilon = 0.2  # Clipping value
+
+    agent = KukaPPOAgent(state_size, action_size,
+                         LR_A, LR_C, BATCH_SIZE,
+                         MEMORY_CAPACITY, lmdba, epsilon,
+                         GAMMA, upper_bound, lower_bound)
+
+    # agent = KukaPPOAgent2(state_size, action_size,
+    #                      LR_A, LR_C, BATCH_SIZE,
+    #                      MEMORY_CAPACITY, lmbda, epsilon,
+    #                      GAMMA, upper_bound, lower_bound)
+
     # print("Loading model...")
     # agent.load_model('./agent_checkpoint/',
     #                  'actor_weights.h5',
@@ -132,76 +147,87 @@ if __name__ == "__main__":
     #                  'ep_reward_list')
     # print("Success!")
 
-    # agent = KukaPPOAgent(state_size, action_size,
-    #                      LR_A, LR_C, BATCH_SIZE,
-    #                      MEMORY_CAPACITY, 0.95, 0.2,
-    #                      GAMMA, upper_bound, lower_bound)
-
-    agent = KukaPPOAgent2(state_size, action_size,
-                         LR_A, LR_C, BATCH_SIZE,
-                         MEMORY_CAPACITY, 0.95, 0.2,
-                         GAMMA, upper_bound, lower_bound)
-
     actor_loss, critic_loss = 0, 0
     ep_reward_list = agent.reward_list
     avg_reward_list = []
     best_score = - np.inf
     start_episode = agent.start_episode
-    rand_eps = 15  # Just explore for a little bit at start
+
+    # For HER
+    ep_exp = []
+    optimisation_steps = 10
+    K = 4
+
     for episode in range(start_episode, MAX_EPISODES):
         agent.done_ep = False
+        if _HER:
+            goal = env.reset()
+            goal = np.asarray(goal, dtype=np.float32) / 255.0  # convert into float array
         obsv = env.reset()
         state = np.asarray(obsv, dtype=np.float32) / 255.0  # convert into float array
         episodic_reward = 0
         frames = []
         ep_frames = []
         step = 0
+        ep_exp = []
         while True:
-            # if episode % 100 == 0:
-            #     ep_frames.append(env.render(mode='rgb_array'))
             if episode > MAX_EPISODES - 3:
                 frames.append(env.render(mode='rgb_array'))
 
-            # convert the numpy array state into a tensor of size (1, 48, 48)
-            tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+            if _HER:
+                tf_goal = tf.expand_dims(tf.convert_to_tensor(goal), 0)
+                tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+                action = agent.policy(tf_state, tf_goal)
+                next_obsv, reward, done, info = env.step(action)
+                next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0  # convert into float array
+                tb_img = np.reshape(next_state, (-1,) + state_size)  # for tensorboard
 
-            # take an action as per the policy
-            if episode < rand_eps:
-                action = env.action_space.sample()
+                with train_summary_writer.as_default():
+                    tf.summary.image("Training Image", tb_img, step=episode)
+                    tf.summary.histogram("action_vector", action, step=step)
+
+                episodic_reward += reward
+
+                agent.buffer.record(state, action, reward, next_state, done, goal)
+                ep_exp.append([state, action, reward, next_state, done, goal])
+
+                if done:
+                    agent.done_ep = True
+
             else:
+                # convert the numpy array state into a tensor of size (1, 48, 48)
+                tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+
+                # take an action as per the policy
                 action = agent.policy(tf_state)
 
-            # obtain next state and rewards
-            next_obsv, reward, done, info = env.step(action)
-            next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0  # convert into float array
+                # obtain next state and rewards
+                next_obsv, reward, done, info = env.step(action)
+                next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0  # convert into float array
 
-            # tb_img = np.reshape(next_state, (-1, 48, 48, 3))  # for tensorboard
-            tb_img = np.reshape(next_state, (-1,) + state_size)  # for tensorboard
+                tb_img = np.reshape(next_state, (-1,) + state_size)  # for tensorboard
 
-            with train_summary_writer.as_default():
-                tf.summary.image("Training Image", tb_img, step=episode)
-                tf.summary.histogram("action_vector", action, step=step)
+                with train_summary_writer.as_default():
+                    tf.summary.image("Training Image", tb_img, step=episode)
+                    tf.summary.histogram("action_vector", action, step=step)
 
-            episodic_reward += reward
+                episodic_reward += reward
 
-            # store experience
-            agent.buffer.record(state, action, reward, next_state, done)
+                # store experience
+                agent.buffer.record(state, action, reward, next_state, done)
 
-            if done:
-                agent.done_ep = True
-            # train the network
-            actor_loss, critic_loss = agent.experience_replay()
+                if done:
+                    agent.done_ep = True
+                # train the network
+                actor_loss, critic_loss = agent.experience_replay()
 
-            # update the target model
-            agent.update_targets()
+                # update the target model
+                agent.update_targets()
 
             if actor_loss != 0 and critic_loss != 0:
                 with train_summary_writer.as_default():
                     tf.summary.scalar('actor_loss', actor_loss, step=episode)
                     tf.summary.scalar('critic_loss', critic_loss, step=episode)
-                # with graph_summary_writer.as_default():
-                #     tf.summary.trace_export(name="update_target", step=episode,
-                #                             profiler_outdir=graph_log_dir)
 
             state = next_state
             step += 1
@@ -221,10 +247,9 @@ if __name__ == "__main__":
                     print("Agent model saved!")
                 if episodic_reward > best_score:
                     best_score = episodic_reward
-                    # agent.actor.save_weights('./kuka_actor_weights.h5')
-                    # agent.critic.save_weights('./kuka_critic_weights.h5')
                 break
 
+        # End of episode
         ep_reward_list.append(episodic_reward)
         avg_reward = np.mean(ep_reward_list[-100:])
         print("Episode {}: Exp Size = {}, Reward = {}, AvgReward = {} "
@@ -233,6 +258,25 @@ if __name__ == "__main__":
 
         with train_summary_writer.as_default():
             tf.summary.scalar('avg_reward', avg_reward, step=episode)
+
+        if _HER:
+            # For each step of the finished episode
+            for t in range(len(ep_exp)):
+                # Remove k loop for final state strategy
+                for k in range(K):
+                    future = np.random.randint(t, len(ep_exp))  # Future strategy
+                    goal = ep_exp[future][3]
+                    # goal = ep_exp[-1][3]  # Final state strategy
+                    state = ep_exp[t][0]
+                    action = ep_exp[t][1]
+                    next_state = ep_exp[t][3]
+                    done = np.array_equal(next_state, goal)
+                    reward = 1 if done else 0
+                    agent.buffer.record(state, action, reward, next_state, done, goal)
+
+            for i in range(optimisation_steps):
+                actor_loss, critic_loss = agent.experience_replay()
+                agent.update_targets()
 
     env.close()
 

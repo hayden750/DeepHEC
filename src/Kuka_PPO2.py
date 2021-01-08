@@ -44,6 +44,7 @@ class KukaPPOAgent2:
         self.done_ep = False  # Not used here
         self.t_step = 0
         self.t_max = 1000  # Number of timesteps before policy update
+        self.epoch = 10
 
         self.start_episode = 0
         self.reward_list = []
@@ -61,7 +62,9 @@ class KukaPPOAgent2:
 
     def policy(self, state):
         # Get action
-        action = tf.squeeze(self.actor.model(state))
+        tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        action = tf.squeeze(self.actor.model(tf_state))
+        action = action.numpy()
         return action
 
     # Not technically EP, just named so it runs in main
@@ -92,7 +95,7 @@ class KukaPPOAgent2:
             n_sample = self.buffer.size // self.batch_size
             idx = np.arange(self.buffer.size)
             np.random.shuffle(idx)
-            for epoch in range(10):
+            for epoch in range(self.epoch):
                 for b in range(n_sample):
                     ind = idx[b * self.batch_size:(b + 1) * self.batch_size]
                     g = np.asarray(advantages)[ind]
