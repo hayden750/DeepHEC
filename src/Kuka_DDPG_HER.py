@@ -1,4 +1,5 @@
-''' Twin Delayed DDPG Implementation with Actor-Critic '''
+''' DDPG Implementation with Actor-Critic with
+    Hindsight Experience Replay '''
 
 from Replay_Buffer import HER_Buffer
 from FeatureNet import FeatureNetwork
@@ -19,7 +20,7 @@ class KukaDDPGHERAgent:
                  batch_size,
                  memory_capacity,
                  gamma,
-                 upper_bound, lower_bound, clip_noise):
+                 upper_bound, lower_bound):
         self.state_size = state_size
         self.action_size = action_size
         self.replacement = replacement
@@ -30,7 +31,6 @@ class KukaDDPGHERAgent:
         self.gamma = gamma
         self.upper_bound = upper_bound
         self.lower_bound = lower_bound
-        self.clip_noise = clip_noise
         self.train_step = 0
         self.actor_loss = 0
         self.policy_decay = 2
@@ -74,7 +74,7 @@ class KukaDDPGHERAgent:
         # Compute targets
         y = self.compute_targets(r_batch, ns_batch, d_batch, g_batch)
         # Update Critics (Q functions)
-        critic_loss = self.critic.train(s_batch, a_batch, y)
+        critic_loss = self.critic.train(s_batch, g_batch, a_batch, y)
         # Update Actor (Policy) (less frequently than critics)
         actor_loss = self.actor.train(s_batch, g_batch, self.critic)
         self.train_step += 1
@@ -82,25 +82,10 @@ class KukaDDPGHERAgent:
         return actor_loss, critic_loss
 
     def compute_targets(self, r_batch, ns_batch, d_batch, g_batch):
-        # Target smoothing
-        target_actions = self.compute_target_actions(ns_batch, g_batch)
-        target_critic = self.critic.target([ns_batch, target_actions])
+        target_actions = self.actor.target([ns_batch, g_batch])
+        target_critic = self.critic.target([ns_batch, g_batch, target_actions])
         y = r_batch + self.gamma * (1 - d_batch) * target_critic
         return y
-
-    def compute_target_actions(self, ns_batch, g_batch):
-        target_actions = self.actor.target([ns_batch, g_batch])
-
-        # Get noise (scalar value)
-        noise = np.clip(self.noise(), -self.clip_noise, self.clip_noise)
-        # Convert into the same shape as that of the action vector
-        noise_vec = noise * np.ones(self.action_size)
-        # Add noise to the target actions
-        target_actions = target_actions.numpy() + noise_vec
-        # Make sure that the action is within bounds
-        clipped_target_actions = np.clip(target_actions, self.lower_bound, self.upper_bound)
-
-        return clipped_target_actions
 
     def update_targets(self):
         self.actor.update_target()
@@ -201,7 +186,7 @@ class HERActor:
         with tf.GradientTape() as tape:
             actor_weights = self.model.trainable_variables
             actions = self.model([state_batch, goal_batch])
-            critic_value = critic.model([state_batch, actions])
+            critic_value = critic.model([state_batch, goal_batch, actions])
             # -ve value is used to maximize value function
             actor_loss = -tf.math.reduce_mean(critic_value)
 
@@ -260,6 +245,8 @@ class HERCritic:
 
         # Both are passed through separate layer before concatenating
         concat = layers.Concatenate()([state_out, goal_out, action_out])
+        # concat = layers.Concatenate()([state_out, goal_out])
+        # concat = layers.Concatenate()([concat, action_out])
 
         out = layers.Dense(128, activation="relu")(concat)
         out = layers.Dense(64, activation="relu")(out)  # leakyRelu
@@ -274,11 +261,11 @@ class HERCritic:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, state_batch, action_batch, y):
+    def train(self, state_batch, goal_batch, action_batch, y):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            critic_value = self.model([state_batch, action_batch])
+            critic_value = self.model([state_batch, goal_batch, action_batch])
             critic_loss = tf.math.reduce_mean(tf.square(y - critic_value))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)

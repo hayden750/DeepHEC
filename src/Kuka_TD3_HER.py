@@ -1,4 +1,5 @@
-''' Twin Delayed DDPG Implementation with Actor-Critic '''
+''' Twin Delayed DDPG Implementation with Actor-Critic with
+    Hindsight Experience Replay '''
 
 from Replay_Buffer import HER_Buffer
 from FeatureNet import FeatureNetwork
@@ -78,8 +79,8 @@ class KukaTD3HERAgent:
         # Compute targets
         y = self.compute_targets(r_batch, ns_batch, d_batch, g_batch)
         # Update Critics (Q functions)
-        critic_one_loss = self.critic_one.train(s_batch, a_batch, y)
-        critic_two_loss = self.critic_two.train(s_batch, a_batch, y)
+        critic_one_loss = self.critic_one.train(s_batch, g_batch, a_batch, y)
+        critic_two_loss = self.critic_two.train(s_batch, g_batch, a_batch, y)
         # Update Actor (Policy) (less frequently than critics)
         actor_loss = self.actor_loss
         if self.train_step % self.policy_decay == 0:
@@ -92,8 +93,8 @@ class KukaTD3HERAgent:
     def compute_targets(self, r_batch, ns_batch, d_batch, g_batch):
         # Target smoothing
         target_actions = self.compute_target_actions(ns_batch, g_batch)
-        target_critic_one = self.critic_one.target([ns_batch, target_actions])
-        target_critic_two = self.critic_two.target([ns_batch, target_actions])
+        target_critic_one = self.critic_one.target([ns_batch, g_batch, target_actions])
+        target_critic_two = self.critic_two.target([ns_batch, g_batch, target_actions])
         target_critic = np.minimum(target_critic_one, target_critic_two)
         y = r_batch + self.gamma * (1 - d_batch) * target_critic
         return y
@@ -217,7 +218,7 @@ class HERActor:
         with tf.GradientTape() as tape:
             actor_weights = self.model.trainable_variables
             actions = self.model([state_batch, goal_batch])
-            critic_value = critic.model([state_batch, actions])
+            critic_value = critic.model([state_batch, goal_batch, actions])
             # -ve value is used to maximize value function
             actor_loss = -tf.math.reduce_mean(critic_value)
 
@@ -275,8 +276,9 @@ class HERCritic:
         action_out = layers.Dense(32, activation="relu")(action_input)
 
         # Both are passed through separate layer before concatenating
-        concat = layers.Concatenate()([state_out, goal_out])
-        concat = layers.Concatenate()([concat, action_out])
+        concat = layers.Concatenate()([state_out, goal_out, action_out])
+        # concat = layers.Concatenate()([state_out, goal_out])
+        # concat = layers.Concatenate()([concat, action_out])
 
         out = layers.Dense(128, activation="relu")(concat)
         out = layers.Dense(64, activation="relu")(out)  # leakyRelu
@@ -291,11 +293,11 @@ class HERCritic:
                                show_shapes=True, show_layer_names=True)
         return model
 
-    def train(self, state_batch, action_batch, y):
+    def train(self, state_batch, goal_batch, action_batch, y):
         self.train_step_count += 1
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            critic_value = self.model([state_batch, action_batch])
+            critic_value = self.model([state_batch, goal_batch, action_batch])
             critic_loss = tf.math.reduce_mean(tf.square(y - critic_value))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
