@@ -283,7 +283,9 @@ def get_critic():
   action_out = layers.Dense(32, activation="relu")(action_input)
 
   # Both are passed through separate layer before concatenating
-  concat = layers.Concatenate()([state_out, goal_out, action_out])
+  # concat = layers.Concatenate()([state_out, goal_out, action_out])
+  concat = layers.Concatenate()([state_out, goal_out])
+  concat = layers.Concatenate()([concat, action_out])
 
   out = layers.Dense(128, activation="relu")(concat)
   out = layers.Dense(64, activation="relu")(out)  # leakyRelu
@@ -307,6 +309,34 @@ def policy(state, goal, noise_object):
   legal_action = np.clip(sampled_actions, lower_bound, upper_bound)
 
   return np.squeeze(legal_action)
+
+def test_model(n, test_step, prev_succ):
+  test_reward = []
+  for i in range(n):
+    goal = env.reset()
+    prev_state = env.reset()
+    episodic_reward = 0
+    step = 0
+    while True:
+
+      tf_prev_state = tf.expand_dims(tf.convert_to_tensor(prev_state, dtype=float), 0)
+      tf_goal = tf.expand_dims(tf.convert_to_tensor(goal, dtype=float), 0)
+      action = policy(tf_prev_state, tf_goal, ou_noise)
+      state, reward, done, info = env.step(action)
+
+      episodic_reward += reward
+
+      if done:
+          break
+
+      prev_state = state
+      step += 1
+
+    test_reward.append(episodic_reward)
+
+  successes = np.sum(test_reward)
+  print("Test Run {}: Success Rate: {}/{}: Previous Test Success: {}/{}".format(test_step, successes, n, prev_succ, n))
+  return successes
 
 # Training Hyperparameters
 std_dev = 0.2
@@ -343,6 +373,9 @@ buffer = Buffer(50000, 64)
 ep_reward_list = []
 avg_reward_list = []
 best_avg = -np.inf
+test_step = -1
+test_run_eps = 10
+test_success = None
 
 for ep in range(total_episodes):
   goal = env.reset()
@@ -377,9 +410,14 @@ for ep in range(total_episodes):
   success = np.sum(ep_reward_list[-50:])
   # Every 50 episodes see if best mean has improved
   if ep % 50 == 0:
-      if avg_reward > best_avg and ep >= 50:
-          print("Best averaged updated: {:.3f} --> {:.3f}".format(best_avg, avg_reward))
-          best_avg = avg_reward
+    if avg_reward > best_avg and ep >= 50:
+      print("Best averaged updated: {:.3f} --> {:.3f}".format(best_avg, avg_reward))
+      best_avg = avg_reward
+  # Perform test run every 200 episodes
+  if ep % 200 == 0 and ep > 0:
+    print("Performing test run...")
+    test_step += 1
+    test_success = test_model(test_run_eps, test_step, test_success)
   print("Episode: {}: Reward: {}, Success Rate: {}/50, Avg Reward: {}".format(ep, reward, success, avg_reward))
   avg_reward_list.append(avg_reward)
 

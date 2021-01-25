@@ -22,6 +22,7 @@ for episode in range(2):
     for t in count():
         env.render()
         action = env.action_space.sample()
+        print(action)
         next_obs, reward, done, info = env.step(action)
         if done:
             break
