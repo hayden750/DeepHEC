@@ -89,7 +89,6 @@ class Actor_Model:
         logp_old_ph = y_true[:, 1 + self.action_size]
 
         epsilon = 0.2
-
         logp = self.gaussian_likelihood(actions, y_pred)
         ratio = K.exp(logp - logp_old_ph)
 
@@ -455,10 +454,10 @@ class PPOAgent:
 
 if __name__ == "__main__":
     # newest gym fixed bugs in 'BipedalWalker-v2' and now it's called 'BipedalWalker-v3'
-    # env_name = 'BipedalWalker-v3'
+    env_name = 'BipedalWalker-v3'
     # env_name = 'Pendulum-v0'
     # env_name = 'LunarLanderContinuous-v2'
-    env_name = 'MountainCarContinuous-v0'
+    # env_name = 'MountainCarContinuous-v0'
     agent = PPOAgent(env_name)
     agent.run_batch()  # train as PPO
     agent.test()
