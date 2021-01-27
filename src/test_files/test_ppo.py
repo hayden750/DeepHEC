@@ -53,7 +53,7 @@ LR_A = 0.0001    # learning rate for actor
 LR_C = 0.0002    # learning rate for critic
 BATCH_SIZE = 50     # minimum batch size for updating PPO
 MAX_BUFFER_SIZE = 20000     # maximum buffer capacity > TRAIN_EPISODES * 200
-METHOD = 'clip'          # 'clip' or 'penalty'
+METHOD = 'penalty'          # 'clip' or 'penalty'
 
 ##################
 KL_TARGET = 0.01
@@ -303,7 +303,9 @@ class PPOAgent:
             pi = tfp.distributions.Normal(mean, std)
             action = pi.sample(sample_shape=self.action_size)
         valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
-        return valid_action.numpy()[0]
+        if self.action_size[0] > 1:
+            return valid_action.numpy()[0]
+        return valid_action.numpy()
 
         # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         # action = np.clip(action, -self.upper_bound, self.upper_bound)

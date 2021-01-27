@@ -15,7 +15,7 @@ from collections import deque
 from tensorflow.keras import layers, Model
 from tensorflow import keras
 from scipy import signal
-import Box2D
+#import Box2D
 from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
 
 ############################
@@ -33,7 +33,13 @@ if gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(e)
+
+config = tf.compat.v1.ConfigProto()
+config.gpu_options.allow_growth = True
+config.log_device_placement = True
+sess = tf.compat.v1.Session(config=config)
 ################################################
+
 device_name = tf.test.gpu_device_name()
 if device_name != '/device:GPU:0':
     raise SystemError('GPU device not found')
@@ -45,16 +51,16 @@ np.random.seed(20)
 
 ############### hyper parameters
 
-MAX_SEASONS = 5000  # total number of training seasons
-TRAIN_EPISODES = 50  # total number of episodes in each season
-TEST_EPISODES = 10  # total number of episodes for testing
-TRAIN_EPOCHS = 20  # training epochs in each season
-GAMMA = 0.9  # reward discount
-LR_A = 0.0001  # learning rate for actor
-LR_C = 0.0002  # learning rate for critic
-BATCH_SIZE = 50  # minimum batch size for updating PPO
-MAX_BUFFER_SIZE = 20000  # maximum buffer capacity > TRAIN_EPISODES * 200
-METHOD = 'clip'  # 'clip' or 'penalty'
+MAX_SEASONS = 5000      # total number of training seasons
+TRAIN_EPISODES = 50     # total number of episodes in each season
+TEST_EPISODES = 10      # total number of episodes for testing
+TRAIN_EPOCHS = 20       # training epochs in each season
+GAMMA = 0.9     # reward discount
+LR_A = 0.0001    # learning rate for actor
+LR_C = 0.0002    # learning rate for critic
+BATCH_SIZE = 50     # minimum batch size for updating PPO
+MAX_BUFFER_SIZE = 20000     # maximum buffer capacity > TRAIN_EPISODES * 200
+METHOD = 'penalty'          # 'clip' or 'penalty'
 
 ##################
 KL_TARGET = 0.01
@@ -117,10 +123,10 @@ class Actor:
         self.lam = lmbda  # required for 'penalty' method
         self.method = method
         self.kl_target = kl_target  # required for 'penalty' method
-        self.kl_value = 0  # most recent kld value
+        self.kl_value = 0       # most recent kld value
 
-        # create NN models
         self.feature_model = feature_model
+        # create NN models
         self.model = self._build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
@@ -148,6 +154,7 @@ class Actor:
         # input state is a tensor
         mean = tf.squeeze(self.model(state))
         std = tf.squeeze(tf.exp(self.model.logstd))
+
         return mean, std  # returns tensors
 
     def save_weights(self, filename):
@@ -164,6 +171,11 @@ class Actor:
             pi = tfp.distributions.Normal(mean, std)
             ratio = tf.exp(pi.log_prob(tf.squeeze(action_batch)) -
                            old_pi.log_prob(tf.squeeze(action_batch)))
+            if self.action_size[0] > 1:
+                adv_temp = []
+                for i in range(self.action_size[0]):
+                    adv_temp.append(advantages)
+                advantages = np.asarray(adv_temp).T
             surr = ratio * advantages  # surrogate function
             kl = tfp.distributions.kl_divergence(old_pi, pi)
             self.kl_value = tf.reduce_mean(kl)
@@ -198,14 +210,14 @@ class Actor:
 # CRITIC NETWORK
 ################################
 class Critic:
-    def __init__(self, state_size, action_size,
-                 feature_model, learning_rate=1e-3):
+    def __init__(self, state_size, action_size, feature_model,
+                 learning_rate=1e-3):
         self.state_size = state_size
         self.action_size = action_size
         self.lr = learning_rate
         self.train_step_count = 0
-        self.feature_model = feature_model
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
+        self.feature_model = feature_model
         self.model = self._build_net()
 
     def _build_net(self, trainable=True):
@@ -332,26 +344,30 @@ class PPOAgent:
         self.feature = FeatureNetwork(self.state_size)
         self.actor = Actor(self.state_size, self.action_size,
                            self.actor_lr, self.epsilon, self.lmbda,
-                           self.kl_target, self.upper_bound, self.feature, self.method)
-        self.critic = Critic(self.state_size, self.action_size, self.feature, self.critic_lr)
+                           self.kl_target, self.upper_bound, self.feature,
+                           self.method)
+        self.critic = Critic(self.state_size, self.action_size, self.feature,
+                             self.critic_lr)
         self.buffer = Buffer(self.memory_capacity, self.batch_size)
 
     def policy(self, state, greedy=False):
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
         mean, std = self.actor(tf_state)
 
-        # if greedy:
-        #     action = mean
-        # else:
-        #     pi = tfp.distributions.Normal(mean, std)
-        #     action = pi.sample(sample_shape=self.action_size)
-        # valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
-        # return valid_action.numpy()
+        if greedy:
+            action = mean
+        else:
+            pi = tfp.distributions.Normal(mean, std)
+            action = pi.sample(sample_shape=self.action_size)
+        valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
+        if self.action_size[0] > 1:
+            return valid_action.numpy()[0]
+        return valid_action.numpy()
 
-        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
-        action = np.clip(action, -self.upper_bound, self.upper_bound)
+        # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
+        # action = np.clip(action, -self.upper_bound, self.upper_bound)
 
-        return action
+        # return action
 
     def train(self, training_epochs=20, tmax=None):
         if tmax is not None and len(self.buffer) < tmax:
@@ -385,27 +401,21 @@ class PPOAgent:
         adv_split = tf.split(advantages, n_split)
         indexes = np.arange(n_split, dtype=int)
 
-        if self.action_size[0] > 1:
-            for i in range(len(adv_split)):
-                adv_temp = []
-                adv_split_i = adv_split[i]
-                for _ in range(self.action_size[0]):
-                    adv_temp.append(adv_split_i)
-                adv_split[i] = np.asarray(adv_temp).T
-
         a_loss_list = []
         c_loss_list = []
         kld_list = []
         np.random.shuffle(indexes)
+
+        print("Training...")
         for _ in range(training_epochs):
             for i in indexes:
-                old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
+                old_pi = pi[i*self.batch_size: (i+1)*self.batch_size]
 
                 # update actor
                 a_loss, kld = self.actor.train(s_split[i], a_split[i], adv_split[i], old_pi)
                 a_loss_list.append(a_loss)
                 kld_list.append(kld)
-                # a_loss.append(self.actor.train(s_split[i], a_split[i], adv_split[i], old_pi))
+                #a_loss.append(self.actor.train(s_split[i], a_split[i], adv_split[i], old_pi))
 
                 # update critic
                 c_loss_list.append(self.critic.train(s_split[i], dr_split[i]))
@@ -433,7 +443,7 @@ class PPOAgent:
 
         tds = r_batch + self.gamma * ns_values * (1. - d_batch) - s_values
         adv = PPOAgent.discount(tds.numpy(), self.gamma * self.lmbda)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-6)  # sometimes helpful
+        adv = (adv - adv.mean()) / (adv.std() + 1e-6)   #sometimes helpful
         return adv
 
     def save_model(self, path, actorfile, criticfile, bufferfile=None):
@@ -487,14 +497,14 @@ def collect_trajectories(env, agent, max_episodes):
     mean_ep_reward = np.mean(ep_reward_list)
     return steps, mean_ep_reward
 
-
 # This includes seasons for training
 def main1(env, agent):
+
     path = './'
     if agent.method == 'clip':
-        outfile = open(path + 'result_' + 'clip_1' + '.txt', 'w')
+        outfile = open(path + 'result_'+'clip_1'+'.txt', 'w')
     else:
-        outfile = open(path + 'result_' + 'klp_1' + '.txt', 'w')
+        outfile = open(path + 'result_'+'klp_1'+'.txt', 'w')
 
     # training
 
@@ -517,11 +527,10 @@ def main1(env, agent):
 
         if agent.method == 'penalty':
             outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_reward,
-                                                                                a_loss, c_loss, kld_value,
-                                                                                agent.actor.lam))
+                                            a_loss, c_loss, kld_value, agent.actor.lam))
         else:
             outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_reward,
-                                                                        a_loss, c_loss, kld_value))
+                                                                a_loss, c_loss, kld_value))
 
         if s_reward > 0.7:
             print('Problem is solved in {} seasons involving {} steps'.format(s, total_steps))
@@ -534,11 +543,12 @@ def main1(env, agent):
 
 # this is standard approach where the model goes through training over episodes
 def main2(env, agent):
+
     path = './'
     if agent.method == 'clip':
-        outfile = open(path + 'result_' + 'clip_2' + '.txt', 'w')
+        outfile = open(path + 'result_'+'clip_2'+'.txt', 'w')
     else:
-        outfile = open(path + 'result_' + 'klp_2' + '.txt', 'w')
+        outfile = open(path + 'result_'+'klp_2'+'.txt', 'w')
 
     # training
     max_episodes = 10000
@@ -560,7 +570,7 @@ def main2(env, agent):
             agent.buffer.record(state, action, reward, next_state, done)
 
             # train
-            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=10000)
+            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=1000)
 
             ep_reward += reward
             mean_a_loss += a_loss
@@ -579,7 +589,7 @@ def main2(env, agent):
                 total_steps += t
                 break
 
-        if ep > 100 and ep % 20 == 0:
+        if ep > 200 and ep % 100 == 0:
             test_score = validate(env, agent)
             if best_score < test_score:
                 best_score = test_score
@@ -593,22 +603,20 @@ def main2(env, agent):
 
         if agent.method == 'penalty':
             outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(ep, ep_reward,
-                                                                                        np.mean(ep_reward_list),
-                                                                                        mean_a_loss, mean_c_loss,
-                                                                                        mean_kl_value, agent.actor.lam))
+                                    np.mean(ep_reward_list), mean_a_loss, mean_c_loss,
+                                                            mean_kl_value, agent.actor.lam))
         else:
             outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(ep, ep_reward,
-                                                                                np.mean(ep_reward_list), mean_a_loss,
-                                                                                mean_c_loss, mean_kl_value))
+                                            np.mean(ep_reward_list), mean_a_loss,
+                                                        mean_c_loss, mean_kl_value))
 
-        if ep > 100 and best_score > 0.7:
+        if ep > 200 and best_score > 0.7:
             print('Problem is solved in {} seasons involving {} steps with avg reward {}'
                   .format(ep, total_steps, np.mean(ep_reward_list)))
             break
 
     env.close()
     outfile.close()
-
 
 # test a model
 def test(env, agent):
@@ -634,19 +642,21 @@ def test(env, agent):
     print('Avg episodic reward: ', np.mean(ep_reward_list))
     env.close()
 
-
 # used for validating
 def validate(env, agent, ep_max=50):
+    print("Validating...")
     ep_reward_list = []
     for ep in range(ep_max):
         state = env.reset()
+        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
         ep_reward = 0
         t = 0
         while True:
-            if ep % 10 == 0:
-                env.render()
+            # if ep % 10 == 0:
+            #     env.render()
             action = agent.policy(state)
             next_state, reward, done, info = env.step(action)
+            next_state = np.asarray(next_state, dtype=np.float32) / 255.0  # convert into float array
             ep_reward += reward
             t += 1
             state = next_state
@@ -654,19 +664,20 @@ def validate(env, agent, ep_max=50):
                 ep_reward_list.append(ep_reward)
                 break
 
-    return np.mean(ep_reward_list)
-
+    val_score = np.mean(ep_reward_list)
+    print("Validation score:", val_score)
+    return val_score
 
 ####################################
 ### MAIN FUNCTION
 ################################
-
 if __name__ == '__main__':
+
     # Gym Environment
-    # env = gym.make('Pendulum-v0')
-    # env = gym.make('BipedalWalker-v3')
-    # env = gym.make('LunarLanderContinuous-v2')
-    # env = gym.make('MountainCarContinuous-v0')
+    #env = gym.make('Pendulum-v0')
+    #env = gym.make('BipedalWalker-v3')
+    #env = gym.make('LunarLanderContinuous-v2')
+    #env = gym.make('MountainCarContinuous-v0')
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,
                                maxSteps=20,
