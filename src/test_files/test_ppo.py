@@ -51,7 +51,7 @@ TRAIN_EPOCHS = 20       # training epochs in each season
 GAMMA = 0.9     # reward discount
 LR_A = 0.0001    # learning rate for actor
 LR_C = 0.0002    # learning rate for critic
-BATCH_SIZE = 50     # minimum batch size for updating PPO
+BATCH_SIZE = 128     # minimum batch size for updating PPO
 MAX_BUFFER_SIZE = 20000     # maximum buffer capacity > TRAIN_EPISODES * 200
 METHOD = 'penalty'          # 'clip' or 'penalty'
 
@@ -295,17 +295,25 @@ class PPOAgent:
 
     def policy(self, state, greedy=False):
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        # mean, std = self.actor(tf_state)
+        #
+        # if greedy:
+        #     action = mean
+        # else:
+        #     pi = tfp.distributions.Normal(mean, std)
+        #     action = pi.sample(sample_shape=self.action_size)
+        # valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
+        # if self.action_size[0] > 1:
+        #     return valid_action.numpy()[0]
+        # return valid_action.numpy()
+
+        # Use the network to predict the next action to take, using the model
         mean, std = self.actor(tf_state)
 
-        if greedy:
-            action = mean
-        else:
-            pi = tfp.distributions.Normal(mean, std)
-            action = pi.sample(sample_shape=self.action_size)
-        valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
-        if self.action_size[0] > 1:
-            return valid_action.numpy()[0]
-        return valid_action.numpy()
+        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        action = np.clip(action, -self.upper_bound, self.upper_bound)
+
+        return action
 
         # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         # action = np.clip(action, -self.upper_bound, self.upper_bound)
@@ -348,6 +356,7 @@ class PPOAgent:
         c_loss_list = []
         kld_list = []
         np.random.shuffle(indexes)
+        print("Training...")
         for _ in range(training_epochs):
             for i in indexes:
                 old_pi = pi[i*self.batch_size: (i+1)*self.batch_size]
@@ -507,7 +516,7 @@ def main2(env, agent):
             agent.buffer.record(state, action, reward, next_state, done)
 
             # train
-            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=10000)
+            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=20000)
 
             ep_reward += reward
             mean_a_loss += a_loss
@@ -581,13 +590,15 @@ def test(env, agent):
 
 # used for validating
 def validate(env, agent, ep_max=50):
+    print("Validating...")
     ep_reward_list = []
     for ep in range(ep_max):
         state = env.reset()
         ep_reward = 0
         t = 0
         while True:
-            #env.render()
+            if ep > ep_max-6:
+                env.render()
             action = agent.policy(state)
             next_state, reward, done, info = env.step(action)
             ep_reward += reward
@@ -597,6 +608,7 @@ def validate(env, agent, ep_max=50):
                 ep_reward_list.append(ep_reward)
                 break
 
+    print(np.mean(ep_reward_list))
     return np.mean(ep_reward_list)
 
 
@@ -622,10 +634,10 @@ if __name__ == '__main__':
                      LR_A, LR_C, GAMMA, LAM, EPSILON, KL_TARGET, METHOD)
 
     # training with seasons
-    # main1(env, agent)
+    main1(env, agent)
 
     # training with episodes
-    main2(env, agent)
+    #main2(env, agent)
 
     # test
     # test(env, agent)

@@ -52,15 +52,15 @@ np.random.seed(20)
 ############### hyper parameters
 
 MAX_SEASONS = 5000      # total number of training seasons
-TRAIN_EPISODES = 50     # total number of episodes in each season
+TRAIN_EPISODES = 200     # total number of episodes in each season
 TEST_EPISODES = 10      # total number of episodes for testing
 TRAIN_EPOCHS = 20       # training epochs in each season
 GAMMA = 0.9     # reward discount
-LR_A = 0.0001    # learning rate for actor
+LR_A = 0.0002    # learning rate for actor
 LR_C = 0.0002    # learning rate for critic
-BATCH_SIZE = 50     # minimum batch size for updating PPO
-MAX_BUFFER_SIZE = 20000     # maximum buffer capacity > TRAIN_EPISODES * 200
-METHOD = 'penalty'          # 'clip' or 'penalty'
+BATCH_SIZE = 128     # minimum batch size for updating PPO
+MAX_BUFFER_SIZE = 50000     # maximum buffer capacity > TRAIN_EPISODES * 200
+METHOD = 'clip'          # 'clip' or 'penalty'
 
 ##################
 KL_TARGET = 0.01
@@ -352,17 +352,25 @@ class PPOAgent:
 
     def policy(self, state, greedy=False):
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        # mean, std = self.actor(tf_state)
+        #
+        # if greedy:
+        #     action = mean
+        # else:
+        #     pi = tfp.distributions.Normal(mean, std)
+        #     action = pi.sample(sample_shape=self.action_size)
+        # valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
+        # if self.action_size[0] > 1:
+        #     return valid_action.numpy()[0]
+        # return valid_action.numpy()
+
+        # Use the network to predict the next action to take, using the model
         mean, std = self.actor(tf_state)
 
-        if greedy:
-            action = mean
-        else:
-            pi = tfp.distributions.Normal(mean, std)
-            action = pi.sample(sample_shape=self.action_size)
-        valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
-        if self.action_size[0] > 1:
-            return valid_action.numpy()[0]
-        return valid_action.numpy()
+        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        action = np.clip(action, -self.upper_bound, self.upper_bound)
+
+        return action
 
         # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         # action = np.clip(action, -self.upper_bound, self.upper_bound)
@@ -692,10 +700,10 @@ if __name__ == '__main__':
                      LR_A, LR_C, GAMMA, LAM, EPSILON, KL_TARGET, METHOD)
 
     # training with seasons
-    #main1(env, agent)
+    main1(env, agent)
 
     # training with episodes
-    main2(env, agent)
+    #main2(env, agent)
 
     # test
     # test(env, agent)
