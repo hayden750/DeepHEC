@@ -1,21 +1,19 @@
 """
-PPO Algorithm for Pendulum Gym Environment
-- It seems to work properly with best episodic score reaching -200 within 1000 episodes
-- Implements both 'KL-Penalty' method as well as 'PPO-Clip' method
-- makes use of tensorflow probability
-- The program terminates when the best episodic score over 50 episodes > -200
+PPO Algorithm for Kuka Environment
+- Doesn't see much improvement in performance over time,
+- ran for over 600 seasons (200 episodes per season).
+- Seems to train a little at first, from ~0.3 -> ~0.4,
+- but then not much change, slight more improvement -> ~0.46-0.5
 """
 import pickle
-import gym
 import random
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 from collections import deque
-from tensorflow.keras import layers, Model
+from tensorflow.keras import layers
 from tensorflow import keras
 from scipy import signal
-#import Box2D
 from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
 
 ############################
@@ -49,7 +47,7 @@ print('Found GPU at: {}'.format(device_name))
 tf.random.set_seed(20)
 np.random.seed(20)
 
-############### hyper parameters
+############### Hyper-parameters
 
 MAX_SEASONS = 5000      # total number of training seasons
 TRAIN_EPISODES = 200     # total number of episodes in each season
@@ -171,11 +169,14 @@ class Actor:
             pi = tfp.distributions.Normal(mean, std)
             ratio = tf.exp(pi.log_prob(tf.squeeze(action_batch)) -
                            old_pi.log_prob(tf.squeeze(action_batch)))
+
+            # Possibly where training fails, (advantages numpy array)
             if self.action_size[0] > 1:
                 adv_temp = []
                 for i in range(self.action_size[0]):
                     adv_temp.append(advantages)
                 advantages = np.asarray(adv_temp).T
+
             surr = ratio * advantages  # surrogate function
             kl = tfp.distributions.kl_divergence(old_pi, pi)
             self.kl_value = tf.reduce_mean(kl)
@@ -372,11 +373,6 @@ class PPOAgent:
 
         return action
 
-        # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
-        # action = np.clip(action, -self.upper_bound, self.upper_bound)
-
-        # return action
-
     def train(self, training_epochs=20, tmax=None):
         if tmax is not None and len(self.buffer) < tmax:
             return 0, 0, 0
@@ -451,7 +447,7 @@ class PPOAgent:
 
         tds = r_batch + self.gamma * ns_values * (1. - d_batch) - s_values
         adv = PPOAgent.discount(tds.numpy(), self.gamma * self.lmbda)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-6)   #sometimes helpful
+        adv = (adv - adv.mean()) / (adv.std() + 1e-6)   # sometimes helpful
         return adv
 
     def save_model(self, path, actorfile, criticfile, bufferfile=None):
@@ -605,9 +601,9 @@ def main2(env, agent):
                 agent.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
                 print('*** Episode: {}, validation_score: {}. Model saved. ***'.format(ep, best_score))
 
-        # if ep % 100 == 0:
-        #     print('Episode:{}, ep_reward:{:.2f}, avg_reward:{:.2f} \n'
-        #           .format(ep, ep_reward, np.mean(ep_reward_list)))
+        if ep % 100 == 0:
+            print('Episode:{}, ep_reward:{:.2f}, avg_reward:{:.2f} \n'
+                  .format(ep, ep_reward, np.mean(ep_reward_list)))
 
         if agent.method == 'penalty':
             outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(ep, ep_reward,
@@ -681,11 +677,7 @@ def validate(env, agent, ep_max=50):
 ################################
 if __name__ == '__main__':
 
-    # Gym Environment
-    #env = gym.make('Pendulum-v0')
-    #env = gym.make('BipedalWalker-v3')
-    #env = gym.make('LunarLanderContinuous-v2')
-    #env = gym.make('MountainCarContinuous-v0')
+    # Kuka Environment
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,
                                maxSteps=20,
@@ -703,7 +695,7 @@ if __name__ == '__main__':
     main1(env, agent)
 
     # training with episodes
-    #main2(env, agent)
+    # main2(env, agent)
 
     # test
     # test(env, agent)
