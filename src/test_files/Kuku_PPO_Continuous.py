@@ -26,6 +26,7 @@ from tensorflow.keras.layers import Input, Dense
 from tensorflow.keras.optimizers import Adam, RMSprop, Adagrad, Adadelta
 from tensorflow.keras import backend as K
 import copy
+from scipy import signal
 
 from threading import Thread, Lock
 from multiprocessing import Process, Pipe
@@ -253,6 +254,10 @@ class PPOAgent:
         # discounted_r = self.discount_rewards(rewards)
         # advantages = np.vstack(discounted_r - values)
 
+        print(len(values))
+        print(len(states))
+        print(len(rewards))
+
         advantages, target = self.get_gaes(rewards, dones, np.squeeze(values), np.squeeze(next_values))
         '''
         pylab.plot(adv,'.')
@@ -266,7 +271,7 @@ class PPOAgent:
         # stack everything to numpy array
         # pack all advantages, predictions and actions to y_true and when they are received
         # in custom loss function we unpack it
-        print(len(advantages))
+        print(np.reshape(advantages, self.state_size).shape)
         print(len(actions))
         print(len(logp_ts))
         y_true = np.hstack([advantages, actions, logp_ts])
