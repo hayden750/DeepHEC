@@ -81,11 +81,13 @@ class FeatureNetwork:
 
 
 class Actor:
-    def __init__(self, input_shape, action_space, lr, feature):
+    def __init__(self, input_shape, action_space, lr, epsilon, feature):
         self.state_size = input_shape
         self.action_size = action_space
         self.lr = lr
         self.upper_bound = 1.0
+        self.entropy_coeff = 0.01
+        self.epsilon = epsilon  # Clipping value
         self.feature_model = feature
         self.model = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
@@ -111,10 +113,9 @@ class Actor:
 
         return model
 
-    def train(self, states, advantages, actions, old_pi):
+    def train(self, states, advantages, actions, old_pi, c_loss):
 
         with tf.GradientTape() as tape:
-            epsilon = 0.07
 
             mean = tf.squeeze(self.model(states))
             std = tf.squeeze(tf.exp(self.model.logstd))
@@ -125,9 +126,11 @@ class Actor:
             adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
 
             p1 = ratio * adv_stack
-            p2 = tf.clip_by_value(ratio, 1. - epsilon, 1. + epsilon) * adv_stack
+            p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
+            l_clip = K.mean(K.minimum(p1, p2))
+            entropy = tf.reduce_mean(new_pi.entropy())
 
-            actor_loss = -K.mean(K.minimum(p1, p2))
+            actor_loss = - (l_clip - c_loss + self.entropy_coeff * entropy)
             actor_weights = self.model.trainable_variables
 
         # outside gradient tape
@@ -178,7 +181,7 @@ class Critic:
 
 
 class PPOAgent:
-    def __init__(self, env, EPISODES, success_value, lr, epochs, training_batch, batch_size):
+    def __init__(self, env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilom):
         self.env = env
         self.action_size = self.env.action_space.shape[0]
         self.state_size = self.env.observation_space.shape
@@ -191,13 +194,14 @@ class PPOAgent:
         self.epochs = epochs
         self.training_batch = training_batch
         self.batch_size = batch_size
+        self.epsilon = epsilon
 
         self.shuffle = True
 
         # Create Actor-Critic network models
         self.feature = FeatureNetwork(self.state_size)
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
-                           feature=self.feature)
+                           epsilon=self.epsilon, feature=self.feature)
         self.critic = Critic(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
                              feature=self.feature)
 
@@ -263,12 +267,12 @@ class PPOAgent:
         for _ in range(self.epochs):
             for i in indexes:
                 old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
-                # Update actor
-                a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi)
-                a_loss_list.append(a_loss)
                 # Update critic
                 c_loss = self.critic.train(s_split[i], t_split[i])
                 c_loss_list.append(c_loss)
+                # Update actor
+                a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss)
+                a_loss_list.append(a_loss)
 
         self.replay_count += 1
 
@@ -386,12 +390,13 @@ if __name__ == "__main__":
     epochs = 10
     training_batch = 1024
     batch_size = 128
+    epsilon = 0.07
 
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,
                                maxSteps=20,
                                removeHeightHack=False)
-    agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size)
+    agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon)
     agent.run_batch()  # train as PPO
 
 

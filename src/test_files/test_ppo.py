@@ -519,7 +519,7 @@ def main2(env, agent):
             agent.buffer.record(state, action, reward, next_state, done)
 
             # train
-            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=5000)
+            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=1000)
 
             ep_reward += reward
             mean_a_loss += a_loss
@@ -623,9 +623,9 @@ def validate(env, agent, ep_max=50):
 if __name__ == '__main__':
 
     # Gym Environment
-    #env = gym.make('Pendulum-v0')
+    env = gym.make('Pendulum-v0')
     #env = gym.make('BipedalWalker-v3')
-    env = gym.make('LunarLanderContinuous-v2')
+    #env = gym.make('LunarLanderContinuous-v2')
     #env = gym.make('MountainCarContinuous-v0')
     state_dim = env.observation_space.shape
     action_dim = env.action_space.shape
