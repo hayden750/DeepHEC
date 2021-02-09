@@ -23,6 +23,8 @@ import tensorflow_probability as tfp
 tf.compat.v1.disable_eager_execution()  # usually using this for fastest performance
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import Input, Dense
+from tensorflow import keras
+from tensorflow.keras import layers
 from tensorflow.keras.optimizers import Adam, RMSprop, Adagrad, Adadelta
 from tensorflow.keras import backend as K
 import copy
@@ -60,29 +62,67 @@ if device_name != '/device:GPU:0':
     raise SystemError('GPU device not found')
 print('Found GPU at: {}'.format(device_name))
 
+
+######################
+# FEATURE NETWORK
+#####################
+class FeatureNetwork:
+    def __init__(self, state_size, learning_rate=1e-3):
+        print("Initialising Feature network")
+        self.state_size = state_size
+        self.lr = learning_rate
+        # create NN models
+        self.model = self._build_net()
+        self.optimizer = tf.keras.optimizers.Adam(self.lr)
+
+    def _build_net(self):
+        img_input = layers.Input(shape=self.state_size)
+
+        # shared convolutional layers
+        conv1 = layers.Conv2D(15, kernel_size=5, strides=2,
+                              padding="SAME", activation="relu")(img_input)
+        bn1 = layers.BatchNormalization()(conv1)
+        conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(bn1)
+        bn2 = layers.BatchNormalization()(conv2)
+        conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(bn2)
+        bn3 = layers.BatchNormalization()(conv3)
+        f1 = layers.Flatten()(bn3)
+        fc1 = layers.Dense(128, activation='relu')(f1)
+        fc2 = layers.Dense(64, activation='relu')(fc1)
+        model = tf.keras.Model(inputs=img_input, outputs=fc2)
+        print('shared feature network')
+        model.summary()
+        keras.utils.plot_model(model, to_file='feature_net.png',
+                               show_shapes=True, show_layer_names=True)
+        return model
+
+    def __call__(self, state):
+        return self.model(state)
+
 class Actor_Model:
-    def __init__(self, input_shape, action_space, lr, optimizer):
+    def __init__(self, input_shape, action_space, lr, feature):
         self.state_size = input_shape
         self.action_size = action_space
         self.lr = lr
         self.upper_bound = 1.0
+        self.feature_model = feature
         self.model = self.build_net()
 
     def build_net(self):
-        # Initialise weights
+        # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
+        state_input = tf.keras.layers.Input(shape=self.state_size)
+        f = self.feature_model(state_input)
+        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
+        f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
+        net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
+                                        kernel_initializer=last_init, trainable=True)(f)
 
-        input = Input(shape=self.state_size)
-        out = Dense(512, activation="relu", kernel_initializer=last_init)(input)
-        out = Dense(256, activation="relu", kernel_initializer=last_init)(out)
-        out = Dense(64, activation="relu", kernel_initializer=last_init)(out)
-        output = Dense(self.action_size, activation="tanh")(out)
-
-        output = output * self.upper_bound
-
-        model = Model(inputs=input, outputs=output)
-        model.compile(loss=self.ppo_loss_continuous,
-                      optimizer=tf.keras.optimizers.Adam(self.lr))
+        net_out = net_out * self.upper_bound  # element-wise product
+        model = tf.keras.Model(state_input, net_out)
+        model.summary()
 
         return model
 
@@ -107,33 +147,32 @@ class Actor_Model:
         pre_sum = -0.5 * (((actions - pred) / (K.exp(log_std) + 1e-8)) ** 2 + 2 * log_std + K.log(2 * np.pi))
         return K.sum(pre_sum, axis=1)
 
-    def predict(self, state):
-        return self.model.predict(state)
+    def __call__(self, state):
+        pred = tf.squeeze(self.model(state))
+        print(pred)
+        return pred
 
 
 class Critic_Model:
-    def __init__(self, input_shape, action_space, lr, optimizer):
+    def __init__(self, input_shape, action_space, lr, feature):
         self.state_size = input_shape
         self.action_size = action_space
         self.lr = lr
-
+        self.feature_model = feature
         self.model = self.build_net()
 
     def build_net(self):
-        # Initialise weights
-        last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
+        # state input is a stack of 1-D YUV images
+        state_input = tf.keras.layers.Input(shape=self.state_size)
+        feature = self.feature_model(state_input)
+        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
+        out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
+        out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
+        net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
-        input = Input(self.state_size)
-        old_values = Input(shape=(1,))
-
-        out = Dense(512, activation="relu", kernel_initializer=last_init)(input)
-        out = Dense(256, activation="relu", kernel_initializer=last_init)(out)
-        out = Dense(64, activation="relu", kernel_initializer=last_init)(out)
-        value = Dense(1, activation=None)(out)
-
-        model = Model(inputs=[input, old_values], outputs=value)
-        model.compile(loss=[self.critic_PPO2_loss(old_values)],
-                      optimizer=tf.keras.optimizers.Adam(self.lr))
+        # Outputs single value for a given state = V(s)
+        model = tf.keras.Model(inputs=state_input, outputs=net_out)
+        model.summary()
 
         return model
 
@@ -183,13 +222,14 @@ class PPOAgent:
         self.scores_, self.episodes_, self.average_ = [], [], []  # used in matplotlib plots
 
         # Create Actor-Critic network models
-        self.Actor = Actor_Model(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
-                                 optimizer=self.optimizer)
-        self.Critic = Critic_Model(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
-                                   optimizer=self.optimizer)
+        self.feature = FeatureNetwork(self.state_size)
+        self.actor = Actor_Model(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
+                                 feature=self.feature)
+        self.critic = Critic_Model(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
+                                   feature=self.feature)
 
-        self.Actor_name = f"{self.env_name}_PPO_Actor.h5"
-        self.Critic_name = f"{self.env_name}_PPO_Critic.h5"
+        self.actor_name = f"{self.env_name}_PPO_Actor.h5"
+        self.critic_name = f"{self.env_name}_PPO_Critic.h5"
         # self.load() # uncomment to continue training from old weights
 
         # do not change bellow
@@ -198,7 +238,10 @@ class PPOAgent:
 
     def act(self, state):
         # Use the network to predict the next action to take, using the model
-        pred = self.Actor.predict(state)
+        tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
+        pred = tf.squeeze(self.actor.model(tf_state))
+
+        print(pred)
 
         low, high = -1.0, 1.0  # -1 and 1 are boundaries of tanh
         action = pred + np.random.uniform(low, high, size=pred.shape) * self.std
@@ -247,16 +290,12 @@ class PPOAgent:
         logp_ts = np.vstack(logp_ts)
 
         # Get Critic network predictions
-        values = self.Critic.predict(states)
-        next_values = self.Critic.predict(next_states)
+        values = self.critic.predict(states)
+        next_values = self.critic.predict(next_states)
 
         # Compute discounted rewards and advantages
         # discounted_r = self.discount_rewards(rewards)
         # advantages = np.vstack(discounted_r - values)
-
-        print(len(values))
-        print(len(states))
-        print(len(rewards))
 
         advantages, target = self.get_gaes(rewards, dones, np.squeeze(values), np.squeeze(next_values))
         '''
@@ -271,17 +310,14 @@ class PPOAgent:
         # stack everything to numpy array
         # pack all advantages, predictions and actions to y_true and when they are received
         # in custom loss function we unpack it
-        print(np.reshape(advantages, self.state_size).shape)
-        print(len(actions))
-        print(len(logp_ts))
         y_true = np.hstack([advantages, actions, logp_ts])
 
         # training Actor and Critic networks
-        a_loss = self.Actor.model.fit(states, y_true, epochs=self.epochs, verbose=0, shuffle=self.shuffle)
-        c_loss = self.Critic.model.fit([states, values], target, epochs=self.epochs, verbose=0, shuffle=self.shuffle)
+        a_loss = self.actor.model.fit(states, y_true, epochs=self.epochs, verbose=0, shuffle=self.shuffle)
+        c_loss = self.critic.model.fit([states, values], target, epochs=self.epochs, verbose=0, shuffle=self.shuffle)
 
         # calculate loss parameters (should be done in loss, but couldn't find working way how to do that with disabled eager execution)
-        pred = self.Actor.predict(states)
+        pred = self.actor(states)
         log_std = -0.5 * np.ones(self.action_size, dtype=np.float32)
         logp = self.gaussian_likelihood(actions, pred, log_std)
         approx_kl = np.mean(logp_ts - logp)
@@ -294,12 +330,12 @@ class PPOAgent:
         self.replay_count += 1
 
     def load(self):
-        self.Actor.model.load_weights(self.Actor_name)
-        self.Critic.model.load_weights(self.Critic_name)
+        self.actor.model.load_weights(self.actor_name)
+        self.critic.model.load_weights(self.critic_name)
 
     def save(self):
-        self.Actor.model.save_weights(self.Actor_name)
-        self.Critic.model.save_weights(self.Critic_name)
+        self.actor.model.save_weights(self.actor_name)
+        self.critic.model.save_weights(self.critic_name)
 
     pylab.figure(figsize=(18, 9))
     pylab.subplots_adjust(left=0.05, right=0.98, top=0.96, bottom=0.06)
@@ -340,13 +376,12 @@ class PPOAgent:
     def run_batch(self):
         state = self.env.reset()
         # state = np.reshape(state, [1, self.state_size[0]])
-        state = self.preprocess_state(state)
-        print(state.shape)
+        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
         done, score, SAVING = False, 0, ''
         while True:
             # Instantiate or reset games memory
             states, next_states, actions, rewards, dones, logp_ts = [], [], [], [], [], []
-            for t in range(50):
+            for t in range(50):  # change to 1000
                 if self.episode % 100 == 0:
                     self.env.render()
                 # Actor picks an action
@@ -356,7 +391,7 @@ class PPOAgent:
                 # Memorize (state, next_states, action, reward, done, logp_ts) for training
                 states.append(state)
                 # next_states.append(np.reshape(next_state, [1, self.state_size[0]]))
-                next_state = self.preprocess_state(next_state)
+                next_state = np.asarray(next_state, dtype=np.float32) / 255.0  # convert into float array
                 next_states.append(next_state)
                 actions.append(action)
                 rewards.append(reward)
@@ -377,7 +412,7 @@ class PPOAgent:
 
                     state, done, score, SAVING = self.env.reset(), False, 0, ''
                     # state = np.reshape(state, [1, self.state_size[0]])
-                    state = self.preprocess_state(state)
+                    state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
 
             self.replay(states, actions, rewards, dones, next_states, logp_ts)
             if self.episode >= self.EPISODES:
@@ -467,7 +502,7 @@ class PPOAgent:
             score = 0
             while not done:
                 self.env.render()
-                action = self.Actor.predict(state)[0]
+                action = self.actor(state)
                 state, reward, done, _ = self.env.step(action)
                 state = np.reshape(state, [1, self.state_size[0]])
                 score += reward
