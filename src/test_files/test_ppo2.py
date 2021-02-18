@@ -82,7 +82,8 @@ class Actor:
                            old_pi.log_prob(tf.squeeze(actions)))
 
             # Change stack amount for action size
-            adv_stack = tf.stack([advantages, advantages], axis=1)
+            # adv_stack = tf.stack([advantages, advantages], axis=1)
+            adv_stack = advantages
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - epsilon, 1. + epsilon) * adv_stack
@@ -168,8 +169,8 @@ class PPOAgent:
 
         mean, std = self.actor(tf_state)
 
-        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
-        # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
+        #action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         action = np.clip(action, -self.upper_bound, self.upper_bound)
 
         return action
@@ -306,9 +307,9 @@ if __name__ == "__main__":
     training_batch = 1024
     batch_size = 64
 
-    #env = gym.make('Pendulum-v0')
+    env = gym.make('Pendulum-v0')
     #env = gym.make('BipedalWalker-v3')
-    env = gym.make('LunarLanderContinuous-v2')
+    #env = gym.make('LunarLanderContinuous-v2')
     #env = gym.make('MountainCarContinuous-v0')
     agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size)
     agent.run_batch()  # train as PPO

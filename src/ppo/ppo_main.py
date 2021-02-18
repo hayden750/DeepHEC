@@ -8,7 +8,7 @@ Status: Work in Progress
 from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
 import numpy as np
 import tensorflow as tf
-from ppo2 import KukaPPOAgent
+from kuka_ppo import KukaPPOAgent
 import datetime
 import os
 from collections import deque

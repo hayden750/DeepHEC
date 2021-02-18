@@ -11,6 +11,8 @@ from collections import deque
 from packaging import version
 import datetime
 
+import os
+
 
 ########################################
 # check tensorflow version
@@ -39,6 +41,23 @@ device_name = tf.test.gpu_device_name()
 if device_name != '/device:GPU:0':
     raise SystemError('GPU device not found')
 print('Found GPU at: {}'.format(device_name))
+
+
+class Buffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.state_buffer = deque(maxlen=capacity)
+        self.action_buffer = deque(maxlen=capacity)
+        self.return_buffer = deque(maxlen=capacity)
+        self.size = 0
+
+    def record(self, state, action, rtrn):
+        self.state_buffer.append(state)
+        self.action_buffer.append(action)
+        self.return_buffer.append(rtrn)
+
+        if self.size < self.capacity:
+          self.size += 1
 
 
 ######################
@@ -139,10 +158,36 @@ class Actor:
 
         return actor_loss.numpy()
 
+    def train_sil(self, states, actions, returns, critic):
+        with tf.GradientTape() as tape:
+            actor_weights = self.model.trainable_variables
+            critic_value = tf.squeeze(critic.model(states))
+
+            mean = tf.squeeze(self.model(states))
+            std = tf.squeeze(tf.exp(self.model.logstd))
+            new_pi = tfp.distributions.Normal(mean, std)
+
+            p1 = -new_pi.log_prob(tf.squeeze(actions))
+            p2 = tf.maximum(returns - critic_value, 0)
+
+            p2_stack = tf.stack([p2, p2, p2], axis=1)
+
+            actor_loss = p1 * p2_stack
+
+        actor_grad = tape.gradient(actor_loss, actor_weights)
+        self.optimizer.apply_gradients(zip(actor_grad, actor_weights))
+        return actor_loss.numpy()
+
     def __call__(self, state):
         mean = tf.squeeze(self.model(state))
         std = tf.squeeze(tf.exp(self.model.logstd))
         return mean, std  # returns tensors
+
+    def save_weights(self, filename):
+        self.model.save_weights(filename)
+
+    def load_weights(self, filename):
+        self.model.load_weights(filename)
 
 
 class Critic:
@@ -179,9 +224,25 @@ class Critic:
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
         return critic_loss.numpy()
 
+    def train_sil(self, states, returns):
+        with tf.GradientTape() as tape:
+            critic_weights = self.model.trainable_variables
+            critic_value = tf.squeeze(self.model(states))
+            critic_loss = 0.5 * tf.square(tf.maximum(returns - critic_value, 0))
+
+        critic_grad = tape.gradient(critic_loss, critic_weights)
+        self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
+        return critic_loss.numpy()
+
+    def save_weights(self, filename):
+        self.model.save_weights(filename)
+
+    def load_weights(self, filename):
+        self.model.load_weights(filename)
+
 
 class PPOAgent:
-    def __init__(self, env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilom):
+    def __init__(self, env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon, gamma, lmbda):
         self.env = env
         self.action_size = self.env.action_space.shape[0]
         self.state_size = self.env.observation_space.shape
@@ -195,6 +256,10 @@ class PPOAgent:
         self.training_batch = training_batch
         self.batch_size = batch_size
         self.epsilon = epsilon
+        self.gamma = gamma
+        self.lmbda = lmbda
+        self.M = 10
+        self.buffer = Buffer(20480)
 
         self.shuffle = True
 
@@ -220,8 +285,8 @@ class PPOAgent:
         return action
 
     def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
-        gamma = 0.993
-        lmbda = 0.5
+        gamma = self.gamma
+        lmbda = self.lmbda
         s_values = tf.squeeze(self.critic.model(s_batch))  # input: tensor
         ns_values = tf.squeeze(self.critic.model(ns_batch))
         returns = []
@@ -237,10 +302,8 @@ class PPOAgent:
         return adv, returns
 
     def replay(self, states, actions, rewards, dones, next_states):
-        print("Training...")
 
         n_split = len(rewards) // self.batch_size
-        n_samples = n_split * self.batch_size
 
         states = tf.convert_to_tensor(states, dtype=tf.float32)
         actions = tf.convert_to_tensor(actions, dtype=tf.float32)
@@ -274,12 +337,30 @@ class PPOAgent:
                 a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss)
                 a_loss_list.append(a_loss)
 
+        # Add to buffer for SIL
+        for i in range(len(states)):
+            self.buffer.record(states[i], actions[i], target[i])
+
+        # SIL learning
+        sil_n_split = self.buffer.size // self.batch_size
+        sil_s_split = tf.split(list(self.buffer.state_buffer), sil_n_split)
+        sil_a_split = tf.split(list(self.buffer.action_buffer), sil_n_split)
+        sil_t_split = tf.split(list(self.buffer.return_buffer), sil_n_split)
+        sil_indexes = np.arange(sil_n_split, dtype=int)
+
+        np.random.shuffle(sil_indexes)
+        for i in sil_indexes[:self.M]:
+            # SIL update actor
+            sil_a_loss = self.actor.train_sil(sil_s_split[i], sil_a_split[i], sil_t_split[i], self.critic)
+            # SIL update critic
+            sil_c_loss = self.critic.train_sil(sil_s_split[i], sil_t_split[i])
+
         self.replay_count += 1
 
         return np.mean(a_loss_list), np.mean(c_loss_list)
 
     # Validation Routine
-    def validate(self, env, max_eps=30):
+    def validate(self, env, max_eps=50):
 
         ep_reward_list = []
         for ep in range(max_eps):
@@ -302,12 +383,21 @@ class PPOAgent:
         return mean_ep_reward
 
     def run_batch(self):
+
+        path = './'
+
+        filename = path + 'result_ppo_clip.txt'
+        if os.path.exists(filename):
+            os.remove(filename)
+        else:
+            print('The file does not exist. It will be created.')
+
         state = self.env.reset()
         state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
-        done, score, SAVING = False, 0, ''
-        # scores = deque(maxlen=100)
+        done, score = False, 0
         best_score = -np.inf
-        prev_val_score = -np.inf
+        val_score = -np.inf
+        val_scores = deque(maxlen=100)
         s = 0
         s_scores = deque(maxlen=100)  # Last 100 season scores
         while True:
@@ -331,44 +421,54 @@ class PPOAgent:
 
                 if done:
                     self.episode += 1
-                    # scores.append(score)
-                    # average = np.mean(scores)
-                    # if average > best_score and self.episode > 100:
-                    #     print("Updated best score: {}->{}".format(best_score, average))
-                    #     best_score = average
-                    #     SAVING = "updated!"
-                    # print("episode: {}/{}, score: {}, average: {:.2f} {}".format(self.episode, self.EPISODES, score,
-                    #                                                              average, SAVING))
-
-                    state, done, score, SAVING = self.env.reset(), False, 0, ''
+                    state, done, score = self.env.reset(), False, 0
                     state = np.asarray(state, dtype=np.float32) / 255.0
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states)
 
             s_scores.append(s_score)
             mean_s_score = np.mean(s_scores)
-            print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
+            if mean_s_score > best_score:
+                self.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
+                print("Season ", s)
+                print("Updated best score {}->{}, Model saved!".format(best_score, mean_s_score))
+                best_score = mean_s_score
             s += 1
 
-            # print("Validating...")
-            # val_score = self.validate(self.env)
-            # print("Validation score: {}, Prev Validation score: {}".format(val_score, prev_val_score))
-            # prev_val_score = val_score
+            if s % 25 == 0:
+                print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
+                val_score = self.validate(self.env)
+                val_scores.append(val_score)
+                mean_val_score = np.mean(val_scores)
+                print("Season: {}, Validation score: {}, Mean Validation score: {}".format(s, val_score, mean_val_score))
 
             if TB_LOG:  # tensorboard logging
                 with train_summary_writer.as_default():
-                    tf.summary.scalar('1. Mean reward', s_score, step=s)
-                    tf.summary.scalar('2. Average Mean reward', mean_s_score, step=s)
-                    tf.summary.scalar('3. Actor Loss', a_loss, step=s)
-                    tf.summary.scalar('4. Critic Loss', c_loss, step=s)
+                    tf.summary.scalar('1. Season score', s_score, step=s)
+                    tf.summary.scalar('2. Average Season Score', mean_s_score, step=s)
+                    tf.summary.scalar('3. Validation score', val_score, step=s)
+                    tf.summary.scalar('4. Actor Loss', a_loss, step=s)
+                    tf.summary.scalar('5. Critic Loss', c_loss, step=s)
 
-            if mean_s_score > self.success_value:
+            if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
                 break
             if self.episode >= self.EPISODES:
                 break
 
         self.env.close()
+
+    def save_model(self, path, actor_filename, critic_filename):
+        actor_file = path + actor_filename
+        critic_file = path + critic_filename
+        self.actor.save_weights(actor_file)
+        self.critic.save_weights(critic_file)
+
+    def load_model(self, path, actor_filename, critic_filename):
+        actor_file = path + actor_filename
+        critic_file = path + critic_filename
+        self.actor.model.load_weights(actor_file)
+        self.critic.model.load_weights(critic_file)
 
 
 if __name__ == "__main__":
@@ -385,20 +485,19 @@ if __name__ == "__main__":
 
     ##### Hyper-parameters
     EPISODES = 50000
-    success_value = 70
+    success_value = 40
     lr = 0.0002
     epochs = 10
-    training_batch = 1024
-    batch_size = 128
-    epsilon = 0.07
+    training_batch = 1024 // 2
+    batch_size = 128 // 2
+    epsilon = 0.05
+    gamma = 0.993
+    lmbda = 0.7
 
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,
                                maxSteps=20,
                                removeHeightHack=False)
-    agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon)
+    agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon, gamma, lmbda)
     agent.run_batch()  # train as PPO
-
-
-
 

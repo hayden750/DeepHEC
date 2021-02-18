@@ -5,7 +5,7 @@ PPO_CLIP Algorithm
 import tensorflow as tf
 import numpy as np
 from FeatureNet import FeatureNetwork
-from buffer import KukaBuffer
+from Replay_Buffer import Buffer
 import tensorflow_probability as tfp
 from scipy import signal
 

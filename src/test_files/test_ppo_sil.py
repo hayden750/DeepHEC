@@ -2,14 +2,17 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow.keras.optimizers import Adam
 from tensorflow.keras import backend as K
 import tensorflow_probability as tfp
 
-from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
+import Box2D
+import gym
 
 from collections import deque
 from packaging import version
-import datetime
+import copy
+import random
 
 
 ########################################
@@ -41,52 +44,29 @@ if device_name != '/device:GPU:0':
 print('Found GPU at: {}'.format(device_name))
 
 
-######################
-# FEATURE NETWORK
-#####################
-class FeatureNetwork:
-    def __init__(self, state_size, learning_rate=1e-3):
-        print("Initialising Feature network")
-        self.state_size = state_size
-        self.lr = learning_rate
-        # create NN models
-        self.model = self._build_net()
-        self.optimizer = tf.keras.optimizers.Adam(self.lr)
+class Buffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.state_buffer = deque(maxlen=capacity)
+        self.action_buffer = deque(maxlen=capacity)
+        self.return_buffer = deque(maxlen=capacity)
+        self.size = 0
 
-    def _build_net(self):
-        img_input = layers.Input(shape=self.state_size)
+    def record(self, state, action, rtrn):
+        self.state_buffer.append(state)
+        self.action_buffer.append(action)
+        self.return_buffer.append(rtrn)
 
-        # shared convolutional layers
-        conv1 = layers.Conv2D(15, kernel_size=5, strides=2,
-                              padding="SAME", activation="relu")(img_input)
-        bn1 = layers.BatchNormalization()(conv1)
-        conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
-                              padding="SAME", activation='relu')(bn1)
-        bn2 = layers.BatchNormalization()(conv2)
-        conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
-                              padding="SAME", activation='relu')(bn2)
-        bn3 = layers.BatchNormalization()(conv3)
-        f1 = layers.Flatten()(bn3)
-        fc1 = layers.Dense(128, activation='relu')(f1)
-        fc2 = layers.Dense(64, activation='relu')(fc1)
-        model = tf.keras.Model(inputs=img_input, outputs=fc2)
-        print('shared feature network')
-        model.summary()
-        keras.utils.plot_model(model, to_file='feature_net.png',
-                               show_shapes=True, show_layer_names=True)
-        return model
-
-    def __call__(self, state):
-        return self.model(state)
+        if self.size < self.capacity:
+          self.size += 1
 
 
 class Actor:
-    def __init__(self, input_shape, action_space, lr, feature):
+    def __init__(self, input_shape, action_space, lr):
         self.state_size = input_shape
         self.action_size = action_space
         self.lr = lr
         self.upper_bound = 1.0
-        self.feature_model = feature
         self.model = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
@@ -96,25 +76,22 @@ class Actor:
         self.model.trainable_variables.append(logstd)
 
     def build_net(self):
-        # input is a stack of 1-channel YUV images
-        last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        f = self.feature_model(state_input)
-        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
-        f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
-        net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
-                                        kernel_initializer=last_init, trainable=True)(f)
-
-        net_out = net_out * self.upper_bound  # element-wise product
-        model = tf.keras.Model(state_input, net_out)
+        last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
+        state_input = layers.Input(shape=self.state_size)
+        l = layers.Dense(128, activation='relu')(state_input)
+        l = layers.Dense(64, activation='relu')(l)
+        l = layers.Dense(64, activation='relu')(l)
+        net_out = layers.Dense(self.action_size, activation='tanh',
+                               kernel_initializer=last_init)(l)
+        net_out = net_out * self.upper_bound
+        model = keras.Model(state_input, net_out)
         model.summary()
-
         return model
 
     def train(self, states, advantages, actions, old_pi):
 
         with tf.GradientTape() as tape:
-            epsilon = 0.07
+            epsilon = 0.2
 
             mean = tf.squeeze(self.model(states))
             std = tf.squeeze(tf.exp(self.model.logstd))
@@ -122,7 +99,9 @@ class Actor:
             ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
                            old_pi.log_prob(tf.squeeze(actions)))
 
-            adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
+            # Change stack amount for action size
+            adv_stack = tf.stack([advantages, advantages, advantages, advantages], axis=1)
+            #adv_stack = advantages
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - epsilon, 1. + epsilon) * adv_stack
@@ -136,6 +115,26 @@ class Actor:
 
         return actor_loss.numpy()
 
+    def train_sil(self, states, actions, returns, critic):
+        with tf.GradientTape() as tape:
+            actor_weights = self.model.trainable_variables
+            critic_value = tf.squeeze(critic.model(states))
+
+            mean = tf.squeeze(self.model(states))
+            std = tf.squeeze(tf.exp(self.model.logstd))
+            new_pi = tfp.distributions.Normal(mean, std)
+
+            p1 = -new_pi.log_prob(tf.squeeze(actions))
+            p2 = tf.maximum(returns - critic_value, 0)
+
+            p2_stack = tf.stack([p2, p2, p2, p2], axis=1)
+
+            actor_loss = p1 * p2_stack
+
+        actor_grad = tape.gradient(actor_loss, actor_weights)
+        self.optimizer.apply_gradients(zip(actor_grad, actor_weights))
+        return actor_loss.numpy()
+
     def __call__(self, state):
         mean = tf.squeeze(self.model(state))
         std = tf.squeeze(tf.exp(self.model.logstd))
@@ -143,27 +142,23 @@ class Actor:
 
 
 class Critic:
-    def __init__(self, input_shape, action_space, lr, feature):
+    def __init__(self, input_shape, action_space, lr):
         self.state_size = input_shape
         self.action_size = action_space
         self.lr = lr
-        self.feature_model = feature
         self.model = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
     def build_net(self):
-        # state input is a stack of 1-D YUV images
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        feature = self.feature_model(state_input)
-        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
-        out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
-        out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
-        net_out = tf.keras.layers.Dense(1, trainable=True)(out)
+        state_input = layers.Input(shape=self.state_size)
+        out = layers.Dense(64, activation="relu")(state_input)
+        out = layers.Dense(64, activation="relu")(out)
+        out = layers.Dense(64, activation="relu")(out)
+        net_out = layers.Dense(1)(out)
 
-        # Outputs single value for a given state = V(s)
+        # Outputs single value for give state-action
         model = tf.keras.Model(inputs=state_input, outputs=net_out)
         model.summary()
-
         return model
 
     def train(self, states, returns):
@@ -171,6 +166,16 @@ class Critic:
             critic_weights = self.model.trainable_variables
             critic_value = tf.squeeze(self.model(states))
             critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
+
+        critic_grad = tape.gradient(critic_loss, critic_weights)
+        self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
+        return critic_loss.numpy()
+
+    def train_sil(self, states, returns):
+        with tf.GradientTape() as tape:
+            critic_weights = self.model.trainable_variables
+            critic_value = tf.squeeze(self.model(states))
+            critic_loss = 0.5 * tf.square(tf.maximum(returns - critic_value, 0))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
@@ -191,15 +196,14 @@ class PPOAgent:
         self.epochs = epochs
         self.training_batch = training_batch
         self.batch_size = batch_size
+        self.M = 10
+        self.buffer = Buffer(20480)
 
         self.shuffle = True
 
         # Create Actor-Critic network models
-        self.feature = FeatureNetwork(self.state_size)
-        self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
-                           feature=self.feature)
-        self.critic = Critic(input_shape=self.state_size, action_space=self.action_size, lr=self.lr,
-                             feature=self.feature)
+        self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr)
+        self.critic = Critic(input_shape=self.state_size, action_space=self.action_size, lr=self.lr)
 
         # do not change below
         self.log_std = -0.5 * np.ones(self.action_size, dtype=np.float32)
@@ -211,11 +215,24 @@ class PPOAgent:
         mean, std = self.actor(tf_state)
 
         action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        #action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         action = np.clip(action, -self.upper_bound, self.upper_bound)
 
         return action
 
-    def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
+    def get_gaes(self, rewards, dones, values, next_values, gamma=0.99, lamda=0.90, normalize=True):
+        deltas = [r + gamma * (1 - d) * nv - v for r, d, nv, v in zip(rewards, dones, next_values, values)]
+        deltas = np.stack(deltas)
+        gaes = copy.deepcopy(deltas)
+        for t in reversed(range(len(deltas) - 1)):
+            gaes[t] = gaes[t] + (1 - dones[t]) * gamma * lamda * gaes[t + 1]
+
+        target = gaes + values
+        if normalize:
+            gaes = (gaes - gaes.mean()) / (gaes.std() + 1e-8)
+        return np.vstack(gaes), np.vstack(target)
+
+    def compute_advantages2(self, r_batch, s_batch, ns_batch, d_batch):
         gamma = 0.993
         lmbda = 0.5
         s_values = tf.squeeze(self.critic.model(s_batch))  # input: tensor
@@ -244,7 +261,11 @@ class PPOAgent:
         dones = tf.convert_to_tensor(dones, dtype=tf.float32)
         next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
 
-        advantages, target = self.compute_advantages(rewards, states, next_states, dones)
+        advantages, target = self.compute_advantages2(rewards, states, next_states, dones)
+
+        # Add to buffer for SIL
+        for i in range(len(states)):
+          self.buffer.record(states[i], actions[i], target[i])
 
         s_split = tf.split(states, n_split)
         a_split = tf.split(actions, n_split)
@@ -256,64 +277,51 @@ class PPOAgent:
         mean, std = self.actor(states)
         pi = tfp.distributions.Normal(mean, std)
 
-        a_loss_list = []
-        c_loss_list = []
+        a_loss, c_loss = 0, 0
 
+        # PPO learning
         np.random.shuffle(indexes)
         for _ in range(self.epochs):
             for i in indexes:
                 old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
                 # Update actor
                 a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi)
-                a_loss_list.append(a_loss)
                 # Update critic
                 c_loss = self.critic.train(s_split[i], t_split[i])
-                c_loss_list.append(c_loss)
+
+        # SIL learning
+        sil_n_split = self.buffer.size // self.batch_size
+        sil_s_split = tf.split(list(self.buffer.state_buffer), sil_n_split)
+        sil_a_split = tf.split(list(self.buffer.action_buffer), sil_n_split)
+        sil_t_split = tf.split(list(self.buffer.return_buffer), sil_n_split)
+        sil_indexes = np.arange(sil_n_split, dtype=int)
+
+        np.random.shuffle(sil_indexes)
+        for i in sil_indexes[:self.M]:
+            # SIL update actor
+            sil_a_loss = self.actor.train_sil(sil_s_split[i], sil_a_split[i], sil_t_split[i], self.critic)
+            # SIL update critic
+            sil_c_loss = self.critic.train_sil(sil_s_split[i], sil_t_split[i])
 
         self.replay_count += 1
 
-        return np.mean(a_loss_list), np.mean(c_loss_list)
-
-    # Validation Routine
-    def validate(self, env, max_eps=30):
-
-        ep_reward_list = []
-        for ep in range(max_eps):
-            obsv = env.reset()
-            state = np.ascontiguousarray(obsv, dtype=np.float32) / 255.0  # convert into float array
-            t = 0
-            ep_reward = 0
-            while True:
-                action = self.policy(state)
-                next_obsv, reward, done, _ = env.step(action)
-                next_state = np.ascontiguousarray(next_obsv, dtype=np.float32) / 255.0
-                state = next_state
-                ep_reward += reward
-                t += 1
-                if done:
-                    ep_reward_list.append(ep_reward)
-                    break
-
-        mean_ep_reward = np.mean(ep_reward_list)
-        return mean_ep_reward
+        return a_loss, c_loss
 
     def run_batch(self):
         state = self.env.reset()
-        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+        # state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
         done, score, SAVING = False, 0, ''
-        # scores = deque(maxlen=100)
+        scores = deque(maxlen=100)
         best_score = -np.inf
-        prev_val_score = -np.inf
-        s = 0
-        s_scores = deque(maxlen=100)  # Last 100 season scores
         while True:
             # Instantiate or reset games memory
-            s_score = 0
             states, next_states, actions, rewards, dones = [], [], [], [], []
-            for t in range(self.training_batch):  # self.training_batch
+            for t in range(self.training_batch):
+                if self.episode % 100 < 5:
+                    env.render()
                 action = self.policy(state)
                 next_state, reward, done, _ = self.env.step(action)
-                next_state = np.asarray(next_state, dtype=np.float32) / 255.0
+                # next_state = np.asarray(next_state, dtype=np.float32) / 255.0
 
                 states.append(state)
                 next_states.append(next_state)
@@ -323,42 +331,23 @@ class PPOAgent:
 
                 state = next_state
                 score += reward
-                s_score += reward
 
                 if done:
                     self.episode += 1
-                    # scores.append(score)
-                    # average = np.mean(scores)
-                    # if average > best_score and self.episode > 100:
-                    #     print("Updated best score: {}->{}".format(best_score, average))
-                    #     best_score = average
-                    #     SAVING = "updated!"
-                    # print("episode: {}/{}, score: {}, average: {:.2f} {}".format(self.episode, self.EPISODES, score,
-                    #                                                              average, SAVING))
+                    scores.append(score)
+                    average = np.mean(scores)
+                    if average > best_score and self.episode > 100:
+                        # print("Updated best score: {}->{}".format(best_score, average))
+                        best_score = average
+                        SAVING = "updated!"
+                    print("episode: {}/{}, score: {}, average: {:.2f} {}".format(self.episode, self.EPISODES, score,
+                                                                                 average, SAVING))
 
                     state, done, score, SAVING = self.env.reset(), False, 0, ''
-                    state = np.asarray(state, dtype=np.float32) / 255.0
+                    # state = np.asarray(state, dtype=np.float32) / 255.0
 
-            a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states)
-
-            s_scores.append(s_score)
-            mean_s_score = np.mean(s_scores)
-            print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
-            s += 1
-
-            # print("Validating...")
-            # val_score = self.validate(self.env)
-            # print("Validation score: {}, Prev Validation score: {}".format(val_score, prev_val_score))
-            # prev_val_score = val_score
-
-            if TB_LOG:  # tensorboard logging
-                with train_summary_writer.as_default():
-                    tf.summary.scalar('1. Mean reward', s_score, step=s)
-                    tf.summary.scalar('2. Average Mean reward', mean_s_score, step=s)
-                    tf.summary.scalar('3. Actor Loss', a_loss, step=s)
-                    tf.summary.scalar('4. Critic Loss', c_loss, step=s)
-
-            if mean_s_score > self.success_value:
+            self.replay(states, actions, rewards, dones, next_states)
+            if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
                 break
             if self.episode >= self.EPISODES:
@@ -369,31 +358,17 @@ class PPOAgent:
 
 if __name__ == "__main__":
 
-    #####################
-    # TENSORBOARD SETTINGS
-    TB_LOG = True  # enable / disable tensorboard logging
-
-    if TB_LOG:
-        current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        train_log_dir = 'logs/train/' + current_time
-        train_summary_writer = tf.summary.create_file_writer(train_log_dir)
-    ############################
-
     ##### Hyper-parameters
-    EPISODES = 50000
-    success_value = 70
+    EPISODES = 20000
+    success_value = 250
     lr = 0.0002
     epochs = 10
     training_batch = 1024
-    batch_size = 128
+    batch_size = 64
 
-    env = KukaDiverseObjectEnv(renders=False,
-                               isDiscrete=False,
-                               maxSteps=20,
-                               removeHeightHack=False)
+    #env = gym.make('Pendulum-v0')
+    env = gym.make('BipedalWalker-v3')
+    #env = gym.make('LunarLanderContinuous-v2')
+    #env = gym.make('MountainCarContinuous-v0')
     agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size)
     agent.run_batch()  # train as PPO
-
-
-
-
