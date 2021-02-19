@@ -138,10 +138,14 @@ class Actor:
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
-            l_clip = K.mean(K.minimum(p1, p2))
+            l_clip = - K.mean(K.minimum(p1, p2))
             entropy = tf.reduce_mean(new_pi.entropy())
 
-            actor_loss = - (l_clip - c_loss + self.entropy_coeff * entropy) + esil_loss
+            ppo_loss = l_clip - c_loss + self.entropy_coeff * entropy
+
+            ppo_loss *= 1  # ppo alpha
+
+            actor_loss = ppo_loss + esil_loss
             actor_weights = self.model.trainable_variables
 
         # outside gradient tape
@@ -266,7 +270,7 @@ class PPOAgent:
         return adv, returns
 
     def replay(self, states, actions, rewards, dones, next_states,
-               goals, a_goals, hind_rewards, hind_goals):
+               goals, hind_rewards, hind_goals):
 
         n_split = len(rewards) // self.batch_size
         n_samples = n_split * self.batch_size
@@ -277,7 +281,6 @@ class PPOAgent:
         dones = tf.convert_to_tensor(dones, dtype=tf.float32)
         next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
         goals = tf.convert_to_tensor(goals, dtype=tf.float32)
-        a_goals = tf.convert_to_tensor(a_goals, dtype=tf.float32)
 
         hind_rewards = tf.convert_to_tensor(hind_rewards, dtype=tf.float32)
         hind_goals = tf.convert_to_tensor(hind_goals, dtype=tf.float32)
@@ -314,8 +317,8 @@ class PPOAgent:
                 traj_sel = np.asarray((hind_t_split[i] > t_split[i]), dtype=np.float32)
                 traj_sel = tf.convert_to_tensor(traj_sel, dtype=tf.float32)
                 traj_stack = tf.stack([traj_sel, traj_sel, traj_sel], axis=1)
-                esil_loss = - hind_old_pi.log_prob(tf.squeeze(a_split[i])) * traj_stack
-                esil_beta = (len(traj_sel) / n_samples)
+                esil_loss = - np.sum(hind_old_pi.log_prob(tf.squeeze(a_split[i])) * traj_stack) / n_samples
+                esil_beta = np.sum(traj_sel) / len(traj_sel)
                 esil_loss *= esil_beta
 
                 # Update critic
@@ -421,7 +424,7 @@ class PPOAgent:
                 hind_rewards.append(1) if dones[-i] else hind_rewards.append(0)
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states,
-                                         goals, a_goals, hind_rewards, hind_goals)
+                                         goals, hind_rewards, hind_goals)
 
             s_scores.append(s_score)
             mean_s_score = np.mean(s_scores)
