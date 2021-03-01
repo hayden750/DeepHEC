@@ -1,3 +1,7 @@
+'''
+https://colab.research.google.com/drive/16hleozlJZb00nX2Lyq8XKyg9ud0bY98N?usp=sharing#scrollTo=attenclass
+'''
+
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -58,21 +62,41 @@ class FeatureNetwork:
     def _build_net(self):
         img_input = layers.Input(shape=self.state_size)
 
+        # CNN
         # shared convolutional layers
-        conv1 = layers.Conv2D(15, kernel_size=5, strides=2,
+        conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(img_input)
         bn1 = layers.BatchNormalization()(conv1)
-        attn = layers.Attention()
         conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(bn1)
-        bn2 = layers.BatchNormalization()(conv2)
         conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(conv2)
+        # Max pooling here
+        mp1 = layers.MaxPool2D(padding="SAME")(conv3)
+        bn2 = layers.BatchNormalization()(mp1)
+        conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(bn2)
-        bn3 = layers.BatchNormalization()(conv3)
+        conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(conv4)
+        # max pooling 2 here
+        mp2 = layers.MaxPool2D(padding="SAME")(conv5)
+        bn3 = layers.BatchNormalization()(mp2)
         f1 = layers.Flatten()(bn3)
-        fc1 = layers.Dense(128, activation='relu')(f1)
+
+        # Attention
+        embedded_sequences = layers.Embedding(1024, 64)(f1)
+        lstm = layers.Bidirectional(layers.LSTM(64, return_sequences=True))(embedded_sequences)
+        # Getting our LSTM outputs
+        (lstm, forward_h, forward_c, backward_h, backward_c) = layers.Bidirectional(layers.LSTM(64, return_sequences=True, return_state=True))(lstm)
+        state_h = layers.Concatenate()([forward_h, backward_h])
+        state_c = layers.Concatenate()([forward_c, backward_c])
+        context_vector = layers.Attention()([lstm, state_h])
+
+        # Output
+        f2 = layers.Flatten()(context_vector)
+        fc1 = layers.Dense(128, activation='relu')(f2)
         fc2 = layers.Dense(64, activation='relu')(fc1)
-        model = tf.keras.Model(inputs=img_input, outputs=fc2)
+        model = tf.keras.Model(inputs=[img_input], outputs=fc2)
         print('shared feature network')
         model.summary()
         keras.utils.plot_model(model, to_file='feature_net.png',
@@ -81,6 +105,7 @@ class FeatureNetwork:
 
     def __call__(self, state):
         return self.model(state)
+
 
 
 class Actor:
@@ -331,9 +356,9 @@ class PPOAgent:
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
-        val_scores = deque(maxlen=100)
+        val_scores = deque(maxlen=25)
         s = 0
-        s_scores = deque(maxlen=100)  # Last 100 season scores
+        s_scores = deque(maxlen=25)  # Last 100 season scores
         while True:
             # Instantiate or reset games memory
             s_score = 0
@@ -418,12 +443,12 @@ if __name__ == "__main__":
     ############################
 
     ##### Hyper-parameters
-    EPISODES = 50000
-    success_value = 40
+    EPISODES = 75000
+    success_value = 80
     lr = 0.0002
     epochs = 10
-    training_batch = 1024 // 2
-    batch_size = 128 // 2
+    training_batch = 1024
+    batch_size = 128
     epsilon = 0.05
     gamma = 0.993
     lmbda = 0.7
@@ -434,7 +459,4 @@ if __name__ == "__main__":
                                removeHeightHack=False)
     agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon, gamma, lmbda)
     agent.run_batch()  # train as PPO
-
-
-
 

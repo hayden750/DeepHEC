@@ -1,3 +1,5 @@
+''' Code inspired from https://github.com/pythonlessons/Reinforcement_Learning '''
+
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -59,7 +61,7 @@ class FeatureNetwork:
         img_input = layers.Input(shape=self.state_size)
 
         # shared convolutional layers
-        conv1 = layers.Conv2D(15, kernel_size=5, strides=2,
+        conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(img_input)
         bn1 = layers.BatchNormalization()(conv1)
         conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
@@ -69,9 +71,30 @@ class FeatureNetwork:
                               padding="SAME", activation='relu')(bn2)
         bn3 = layers.BatchNormalization()(conv3)
         f1 = layers.Flatten()(bn3)
+
+        # # shared convolutional layers
+        # conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
+        #                       padding="SAME", activation="relu")(img_input)
+        # bn1 = layers.BatchNormalization()(conv1)
+        # conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn1)
+        # conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(conv2)
+        # # Max pooling here
+        # mp1 = layers.MaxPool2D()(conv3)
+        # bn2 = layers.BatchNormalization()(mp1)
+        # conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn2)
+        # conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(conv4)
+        # # max pooling 2 here
+        # # mp2 = layers.MaxPool2D()(conv5)
+        # bn3 = layers.BatchNormalization()(conv5)
+        # f1 = layers.Flatten()(bn3)
+
         fc1 = layers.Dense(128, activation='relu')(f1)
         fc2 = layers.Dense(64, activation='relu')(fc1)
-        model = tf.keras.Model(inputs=img_input, outputs=fc2)
+        model = tf.keras.Model(inputs=[img_input], outputs=fc2)
         print('shared feature network')
         model.summary()
         keras.utils.plot_model(model, to_file='feature_net.png',
@@ -417,12 +440,12 @@ if __name__ == "__main__":
     ############################
 
     ##### Hyper-parameters
-    EPISODES = 50000
-    success_value = 40
+    EPISODES = 75000
+    success_value = 80
     lr = 0.0002
     epochs = 10
-    training_batch = 1024 // 2
-    batch_size = 128 // 2
+    training_batch = 1024
+    batch_size = 128
     epsilon = 0.05
     gamma = 0.993
     lmbda = 0.7
