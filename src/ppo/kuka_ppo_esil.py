@@ -64,7 +64,7 @@ class FeatureNetwork:
         concat = layers.Concatenate()([img_input, g_input])
 
         # shared convolutional layers
-        conv1 = layers.Conv2D(15, kernel_size=5, strides=2,
+        conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(concat)
         bn1 = layers.BatchNormalization()(conv1)
         conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
@@ -74,6 +74,27 @@ class FeatureNetwork:
                               padding="SAME", activation='relu')(bn2)
         bn3 = layers.BatchNormalization()(conv3)
         f1 = layers.Flatten()(bn3)
+
+        # # shared convolutional layers
+        # conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
+        #                       padding="SAME", activation="relu")(concat)
+        # bn1 = layers.BatchNormalization()(conv1)
+        # conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn1)
+        # conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(conv2)
+        # # Max pooling here
+        # mp1 = layers.MaxPool2D(padding="SAME")(conv3)
+        # bn2 = layers.BatchNormalization()(mp1)
+        # conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn2)
+        # conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(conv4)
+        # # max pooling 2 here
+        # mp2 = layers.MaxPool2D(padding="SAME")(conv5)
+        # bn3 = layers.BatchNormalization()(mp2)
+        # f1 = layers.Flatten()(bn3)
+
         fc1 = layers.Dense(128, activation='relu')(f1)
         fc2 = layers.Dense(64, activation='relu')(fc1)
         model = tf.keras.Model(inputs=[img_input, g_input], outputs=fc2)
@@ -193,11 +214,11 @@ class Critic:
 
         return model
 
-    def train(self, states, returns, goals):
+    def train(self, states, returns, goals, esil_loss):
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
             critic_value = tf.squeeze(self.model([states, goals]))
-            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
+            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value)) # + esil_loss
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
@@ -322,7 +343,7 @@ class PPOAgent:
                 esil_loss *= esil_beta
 
                 # Update critic
-                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i])
+                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i], esil_loss)
                 c_loss_list.append(c_loss)
                 # Update actor
                 a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss, g_split[i], esil_loss)
@@ -376,9 +397,9 @@ class PPOAgent:
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
-        val_scores = deque(maxlen=100)
+        val_scores = deque(maxlen=25)
         s = 0
-        s_scores = deque(maxlen=100)  # Last 100 season scores
+        s_scores = deque(maxlen=25)  # Last 100 season scores
         while True:
             # Instantiate or reset games memory
             count = 0
@@ -433,9 +454,8 @@ class PPOAgent:
                 print("Season ", s)
                 print("Updated best score {}->{}, Model saved!".format(best_score, mean_s_score))
                 best_score = mean_s_score
-            s += 1
 
-            if s % 25 == 0:
+            if s % 10 == 0:
                 print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
                 val_score = self.validate(self.env)
                 val_scores.append(val_score)
@@ -449,6 +469,8 @@ class PPOAgent:
                     tf.summary.scalar('3. Validation score', val_score, step=s)
                     tf.summary.scalar('4. Actor Loss', a_loss, step=s)
                     tf.summary.scalar('5. Critic Loss', c_loss, step=s)
+
+            s += 1
 
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
@@ -484,12 +506,12 @@ if __name__ == "__main__":
     ############################
 
     ##### Hyper-parameters
-    EPISODES = 50000
-    success_value = 40
-    lr = 0.0002
+    EPISODES = 75000
+    success_value = 80
+    lr = 0.0003
     epochs = 10
-    training_batch = 1024 // 2
-    batch_size = 128 // 2
+    training_batch = 1024
+    batch_size = 128
     epsilon = 0.05
     gamma = 0.993
     lmbda = 0.7
@@ -500,4 +522,3 @@ if __name__ == "__main__":
                                removeHeightHack=False)
     agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size, epsilon, gamma, lmbda)
     agent.run_batch()  # train as PPO
-

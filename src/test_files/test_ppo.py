@@ -1,27 +1,25 @@
-"""
-PPO Algorithm for Pendulum Gym Environment
-- It seems to work properly with best episodic score reaching -200 within 1000 episodes
-- Implements both 'KL-Penalty' method as well as 'PPO-Clip' method
-- makes use of tensorflow probability
-- The program terminates when the best episodic score over 50 episodes > -200
-"""
-import pickle
-import gym
-import random
 import numpy as np
 import tensorflow as tf
-import tensorflow_probability as tfp
-from collections import deque
-from tensorflow.keras import layers, Model
 from tensorflow import keras
-from scipy import signal
+from tensorflow.keras import layers
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import backend as K
+import tensorflow_probability as tfp
+
 import Box2D
+import gym
 
-############################
+from collections import deque
+from packaging import version
+import copy
 
-print('TFP Version:', tfp.__version__)
-print('Tensorflow version:', tf.__version__)
-print('Keras Version:', tf.keras.__version__)
+
+########################################
+# check tensorflow version
+print("Tensorflow Version: ", tf.__version__)
+assert version.parse(tf.__version__).release[0] >= 2, \
+    "This program requires Tensorflow 2.0 or above"
+#######################################
 
 ######################################
 # avoid CUDNN_STATUS_INTERNAL_ERROR
@@ -32,55 +30,26 @@ if gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(e)
+
+config = tf.compat.v1.ConfigProto()
+config.gpu_options.allow_growth = True
+config.log_device_placement = True
+sess = tf.compat.v1.Session(config=config)
 ################################################
+
 device_name = tf.test.gpu_device_name()
 if device_name != '/device:GPU:0':
     raise SystemError('GPU device not found')
 print('Found GPU at: {}'.format(device_name))
 
-# set random seed for reproducibility
-tf.random.set_seed(20)
-np.random.seed(20)
 
-############### hyper parameters
-
-MAX_SEASONS = 5000      # total number of training seasons
-TRAIN_EPISODES = 50     # total number of episodes in each season
-TEST_EPISODES = 10      # total number of episodes for testing
-TRAIN_EPOCHS = 20       # training epochs in each season
-GAMMA = 0.9     # reward discount
-LR_A = 0.0001    # learning rate for actor
-LR_C = 0.0002    # learning rate for critic
-BATCH_SIZE = 128     # minimum batch size for updating PPO
-MAX_BUFFER_SIZE = 20000     # maximum buffer capacity > TRAIN_EPISODES * 200
-METHOD = 'penalty'          # 'clip' or 'penalty'
-
-##################
-KL_TARGET = 0.01
-LAM = 0.5
-EPSILON = 0.2
-
-
-#####################
-# ACTOR NETWORK
-####################
 class Actor:
-    def __init__(self, state_size, action_size,
-                 learning_rate, epsilon, lmbda, kl_target,
-                 upper_bound, method='clip'):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.lr = learning_rate
-        self.upper_bound = upper_bound
-        self.train_step_count = 0
-        self.epsilon = epsilon  # required for 'clip' method
-        self.lam = lmbda  # required for 'penalty' method
-        self.method = method
-        self.kl_target = kl_target  # required for 'penalty' method
-        self.kl_value = 0       # most recent kld value
-
-        # create NN models
-        self.model = self._build_net()
+    def __init__(self, input_shape, action_space, lr):
+        self.state_size = input_shape
+        self.action_size = action_space
+        self.lr = lr
+        self.upper_bound = 1.0
+        self.model = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
         # additions
@@ -88,88 +57,66 @@ class Actor:
         self.model.logstd = logstd
         self.model.trainable_variables.append(logstd)
 
-    def _build_net(self):
+    def build_net(self):
         last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
         state_input = layers.Input(shape=self.state_size)
         l = layers.Dense(128, activation='relu')(state_input)
         l = layers.Dense(64, activation='relu')(l)
         l = layers.Dense(64, activation='relu')(l)
-        net_out = layers.Dense(self.action_size[0], activation='tanh',
+        net_out = layers.Dense(self.action_size, activation='tanh',
                                kernel_initializer=last_init)(l)
         net_out = net_out * self.upper_bound
         model = keras.Model(state_input, net_out)
         model.summary()
         return model
 
-    def __call__(self, state):
-        # input state is a tensor
-        mean = tf.squeeze(self.model(state))
-        std = tf.squeeze(tf.exp(self.model.logstd))
-        return mean, std  # returns tensors
-
-    def save_weights(self, filename):
-        self.model.save_weights(filename)
-
-    def load_weights(self, filename):
-        self.model.load_weights(filename)
-
-    def train(self, state_batch, action_batch, advantages, old_pi):
+    def train(self, states, advantages, actions, old_pi):
 
         with tf.GradientTape() as tape:
-            mean = tf.squeeze(self.model(state_batch))
+            epsilon = 0.2
+
+            mean = tf.squeeze(self.model(states))
             std = tf.squeeze(tf.exp(self.model.logstd))
-            pi = tfp.distributions.Normal(mean, std)
-            ratio = tf.exp(pi.log_prob(tf.squeeze(action_batch)) -
-                           old_pi.log_prob(tf.squeeze(action_batch)))
-            if self.action_size[0] > 1:
-                adv_temp = []
-                for i in range(self.action_size[0]):
-                    adv_temp.append(advantages)
-                advantages = np.asarray(adv_temp).T
-            surr = ratio * advantages  # surrogate function
-            kl = tfp.distributions.kl_divergence(old_pi, pi)
-            self.kl_value = tf.reduce_mean(kl)
-            if self.method == 'penalty':  # ppo-penalty method
-                actor_loss = -(tf.reduce_mean(surr - self.lam * kl))
-                # # update the lambda value after each epoch
-                # if kl_mean < self.kl_target / 1.5:
-                #   self.lam /= 2
-                # elif kl_mean > self.kl_target * 1.5:
-                #   self.lam *= 2
-            elif self.method == 'clip':  # ppo-clip method
-                actor_loss = - tf.reduce_mean(
-                    tf.minimum(surr, tf.clip_by_value(ratio,
-                                                      1. - self.epsilon, 1. + self.epsilon) * advantages))
+            new_pi = tfp.distributions.Normal(mean, std)
+            ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
+                           old_pi.log_prob(tf.squeeze(actions)))
+
+            # Change stack amount for action size
+            adv_stack = tf.stack([advantages, advantages, advantages, advantages], axis=1)
+            #adv_stack = advantages
+
+            p1 = ratio * adv_stack
+            p2 = tf.clip_by_value(ratio, 1. - epsilon, 1. + epsilon) * adv_stack
+
+            actor_loss = -K.mean(K.minimum(p1, p2))
             actor_weights = self.model.trainable_variables
 
         # outside gradient tape
         actor_grad = tape.gradient(actor_loss, actor_weights)
         self.optimizer.apply_gradients(zip(actor_grad, actor_weights))
 
-        return actor_loss.numpy(), self.kl_value.numpy()
+        return actor_loss.numpy()
 
-    def update_lambda(self):
-        # update the lambda value after each epoch
-        if self.kl_value < self.kl_target / 1.5:
-            self.lam /= 2
-        elif self.kl_value > self.kl_target * 1.5:
-            self.lam *= 2
+    def gaussian_likelihood(self, actions, pred):
+        log_std = -0.5 * np.ones(self.action_size, dtype=np.float32)
+        pre_sum = -0.5 * (((actions - pred) / (K.exp(log_std) + 1e-8)) ** 2 + 2 * log_std + K.log(2 * np.pi))
+        return K.sum(pre_sum)
+
+    def __call__(self, state):
+        mean = tf.squeeze(self.model(state))
+        std = tf.squeeze(tf.exp(self.model.logstd))
+        return mean, std  # returns tensors
 
 
-####################################
-# CRITIC NETWORK
-################################
 class Critic:
-    def __init__(self, state_size, action_size,
-                 learning_rate=1e-3):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.lr = learning_rate
-        self.train_step_count = 0
+    def __init__(self, input_shape, action_space, lr):
+        self.state_size = input_shape
+        self.action_size = action_space
+        self.lr = lr
+        self.model = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
-        self.model = self._build_net()
 
-    def _build_net(self):
+    def build_net(self):
         state_input = layers.Input(shape=self.state_size)
         out = layers.Dense(64, activation="relu")(state_input)
         out = layers.Dense(64, activation="relu")(out)
@@ -181,466 +128,188 @@ class Critic:
         model.summary()
         return model
 
-    def train(self, state_batch, disc_rewards):
-        self.train_step_count += 1
+    def train(self, states, returns):
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            critic_value = tf.squeeze(self.model(state_batch))
-            critic_loss = tf.math.reduce_mean(tf.square(disc_rewards - critic_value))
+            critic_value = tf.squeeze(self.model(states))
+            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
+
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
         return critic_loss.numpy()
 
-    def save_weights(self, filename):
-        self.model.save_weights(filename)
 
-    def load_weights(self, filename):
-        self.model.load_weights(filename)
-
-
-######################
-# BUFFER
-######################
-class Buffer:
-    def __init__(self, buffer_capacity, batch_size):
-        self.buffer_capacity = buffer_capacity
-        self.batch_size = batch_size
-        self.buffer = deque(maxlen=self.buffer_capacity)
-
-    def __len__(self):
-        return len(self.buffer)
-
-    def record(self, state, action, reward, next_state, done):
-        self.buffer.append([state, action, reward, next_state, done])
-
-    def sample(self):
-        valid_batch_size = min(len(self.buffer), self.batch_size)
-        mini_batch = random.sample(self.buffer, valid_batch_size)
-
-        state_batch = []
-        action_batch = []
-        reward_batch = []
-        next_state_batch = []
-        done_batch = []
-
-        for i in range(valid_batch_size):
-            state_batch.append(mini_batch[i][0])
-            action_batch.append(mini_batch[i][1])
-            reward_batch.append(mini_batch[i][2])
-            next_state_batch.append(mini_batch[i][3])
-            done_batch.append(mini_batch[i][4])
-
-        return state_batch, action_batch, reward_batch, next_state_batch, done_batch
-
-    def save_data(self, filename):
-        with open(filename, 'wb') as file:
-            pickle.dump(self.buffer, file)
-
-    def load_data(self, filename):
-        with open(filename, 'rb') as file:
-            self.buffer = pickle.load(file)
-
-    def get_samples(self, n_samples=None):
-
-        if n_samples is None or n_samples > len(self.buffer):
-            n_samples = len(self.buffer)
-
-        s_batch = []
-        a_batch = []
-        r_batch = []
-        ns_batch = []
-        d_batch = []
-        for i in range(n_samples):
-            s_batch.append(self.buffer[i][0])
-            a_batch.append(self.buffer[i][1])
-            r_batch.append(self.buffer[i][2])
-            ns_batch.append(self.buffer[i][3])
-            d_batch.append(self.buffer[i][4])
-
-        return s_batch, a_batch, r_batch, ns_batch, d_batch
-
-    def clear(self):
-        # empty the buffer
-        self.buffer.clear()
-
-
-#########################################
-## PPO AGENT
-########################################
 class PPOAgent:
-    def __init__(self, state_size, action_size, batch_size,
-                 memory_capacity, upper_bound,
-                 lr_a=1e-3, lr_c=1e-3,
-                 gamma=0.99, lmbda=0.5, epsilon=0.2, kl_target=0.01,
-                 method='clip'):
-        self.state_size = state_size
-        self.action_size = action_size
-        self.actor_lr = lr_a
-        self.critic_lr = lr_c
+    def __init__(self, env, EPISODES, success_value, lr, epochs, training_batch, batch_size):
+        self.env = env
+        self.action_size = self.env.action_space.shape[0]
+        self.state_size = self.env.observation_space.shape
+        self.upper_bound = self.env.action_space.high
+        self.EPISODES = EPISODES
+        self.episode = 0
+        self.replay_count = 0
+        self.success_value = success_value
+        self.lr = lr
+        self.epochs = epochs
+        self.training_batch = training_batch
         self.batch_size = batch_size
-        self.memory_capacity = memory_capacity
-        self.gamma = gamma  # discount factor
-        self.upper_bound = upper_bound
-        self.lmbda = lmbda  # required for GAE
-        self.epsilon = epsilon  # required for PPO-CLIP
-        self.kl_target = kl_target
-        self.method = method
-        self.best_ep_reward = -np.inf
 
-        self.actor = Actor(self.state_size, self.action_size,
-                           self.actor_lr, self.epsilon, self.lmbda,
-                           self.kl_target, self.upper_bound, self.method)
-        self.critic = Critic(self.state_size, self.action_size, self.critic_lr)
-        self.buffer = Buffer(self.memory_capacity, self.batch_size)
+        self.shuffle = True
 
-    def policy(self, state, greedy=False):
+        # Create Actor-Critic network models
+        self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr)
+        self.critic = Critic(input_shape=self.state_size, action_space=self.action_size, lr=self.lr)
+
+        # do not change below
+        self.log_std = -0.5 * np.ones(self.action_size, dtype=np.float32)
+        self.std = np.exp(self.log_std)
+
+    def policy(self, state):
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
-        # mean, std = self.actor(tf_state)
-        #
-        # if greedy:
-        #     action = mean
-        # else:
-        #     pi = tfp.distributions.Normal(mean, std)
-        #     action = pi.sample(sample_shape=self.action_size)
-        # valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
-        # if self.action_size[0] > 1:
-        #     return valid_action.numpy()[0]
-        # return valid_action.numpy()
 
-        # Use the network to predict the next action to take, using the model
         mean, std = self.actor(tf_state)
 
-        if self.action_size[0] > 1:
-            action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
-        else:
-            action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
+        action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        #action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
         action = np.clip(action, -self.upper_bound, self.upper_bound)
 
         return action
 
-        # action = mean + np.random.uniform(-self.upper_bound, self.upper_bound) * std
-        # action = np.clip(action, -self.upper_bound, self.upper_bound)
+    def gaussian_likelihood(self, action, mean, log_std):
+        # https://github.com/hill-a/stable-baselines/blob/master/stable_baselines/sac/policies.py
+        pre_sum = -0.5 * (((action - mean) / (np.exp(log_std) + 1e-8)) ** 2 + 2 * log_std + np.log(2 * np.pi))
+        return np.sum(pre_sum)
 
-        # return action
+    def get_gaes(self, rewards, dones, values, next_values, gamma=0.99, lamda=0.90, normalize=True):
+        deltas = [r + gamma * (1 - d) * nv - v for r, d, nv, v in zip(rewards, dones, next_values, values)]
+        deltas = np.stack(deltas)
+        gaes = copy.deepcopy(deltas)
+        for t in reversed(range(len(deltas) - 1)):
+            gaes[t] = gaes[t] + (1 - dones[t]) * gamma * lamda * gaes[t + 1]
 
-    def train(self, training_epochs=20, tmax=None):
-        if tmax is not None and len(self.buffer) < tmax:
-            return 0, 0, 0
+        target = gaes + values
+        if normalize:
+            gaes = (gaes - gaes.mean()) / (gaes.std() + 1e-8)
+        return np.vstack(gaes), np.vstack(target)
 
-        n_split = len(self.buffer) // self.batch_size
+    def compute_advantages2(self, r_batch, s_batch, ns_batch, d_batch):
+        gamma = 0.993
+        lmbda = 0.5
+        s_values = tf.squeeze(self.critic.model(s_batch))  # input: tensor
+        ns_values = tf.squeeze(self.critic.model(ns_batch))
+        returns = []
+        gae = 0  # generalized advantage estimate
+        for i in reversed(range(len(r_batch))):
+            delta = r_batch[i] + gamma * ns_values[i] * (1 - d_batch[i]) - s_values[i]
+            gae = delta + gamma * lmbda * (1 - d_batch[i]) * gae
+            returns.insert(0, gae + s_values[i])
+
+        returns = np.array(returns)
+        adv = returns - s_values.numpy()
+        adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-10)  # output: numpy array
+        return adv, returns
+
+    def replay(self, states, actions, rewards, dones, next_states):
+        print("Training...")
+
+        n_split = len(rewards) // self.batch_size
         n_samples = n_split * self.batch_size
 
-        s_batch, a_batch, r_batch, ns_batch, d_batch = \
-            self.buffer.get_samples(n_samples)
+        states = tf.convert_to_tensor(states, dtype=tf.float32)
+        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+        next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
 
-        s_batch = tf.convert_to_tensor(s_batch, dtype=tf.float32)
-        a_batch = tf.convert_to_tensor(a_batch, dtype=tf.float32)
-        r_batch = tf.convert_to_tensor(r_batch, dtype=tf.float32)
-        ns_batch = tf.convert_to_tensor(ns_batch, dtype=tf.float32)
-        d_batch = tf.convert_to_tensor(d_batch, dtype=tf.float32)
+        advantages, target = self.compute_advantages2(rewards, states, next_states, dones)
 
-        disc_sum_reward = PPOAgent.discount(r_batch.numpy(), self.gamma)
-        advantages = self.compute_advantages(r_batch, s_batch,
-                                             ns_batch, d_batch)  # returns a numpy array
-        advantages = tf.convert_to_tensor(advantages, dtype=tf.float32)
-        disc_sum_reward = tf.convert_to_tensor(disc_sum_reward, dtype=tf.float32)
-
-        # current policy
-        mean, std = self.actor(s_batch)
-        pi = tfp.distributions.Normal(mean, std)
-
-        s_split = tf.split(s_batch, n_split)
-        a_split = tf.split(a_batch, n_split)
-        dr_split = tf.split(disc_sum_reward, n_split)
+        s_split = tf.split(states, n_split)
+        a_split = tf.split(actions, n_split)
+        t_split = tf.split(target, n_split)
         adv_split = tf.split(advantages, n_split)
         indexes = np.arange(n_split, dtype=int)
 
-        a_loss_list = []
-        c_loss_list = []
-        kld_list = []
+        # current policy
+        mean, std = self.actor(states)
+        pi = tfp.distributions.Normal(mean, std)
+
+        a_loss, c_loss = 0, 0
+
         np.random.shuffle(indexes)
-        print("Training...")
-        for _ in range(training_epochs):
+        for _ in range(self.epochs):
             for i in indexes:
-                old_pi = pi[i*self.batch_size: (i+1)*self.batch_size]
+                old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
+                # Update actor
+                a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi)
+                # Update critic
+                c_loss = self.critic.train(s_split[i], t_split[i])
 
-                # update actor
-                a_loss, kld = self.actor.train(s_split[i], a_split[i], adv_split[i], old_pi)
-                a_loss_list.append(a_loss)
-                kld_list.append(kld)
-                #a_loss.append(self.actor.train(s_split[i], a_split[i], adv_split[i], old_pi))
+        self.replay_count += 1
 
-                # update critic
-                c_loss_list.append(self.critic.train(s_split[i], dr_split[i]))
+        return a_loss, c_loss
 
-            # update lambda after each epoch
-            if self.method == 'penalty':
-                self.actor.update_lambda()
-
-        actor_loss = np.mean(a_loss_list)
-        critic_loss = np.mean(c_loss_list)
-        mean_kld = np.mean(kld_list)
-
-        # clear the buffer  -- this is important
-        self.buffer.clear()
-
-        return actor_loss, critic_loss, mean_kld
-
-    @staticmethod
-    def discount(x, gamma):
-        return signal.lfilter([1.0], [1.0, -gamma], x[::-1])[::-1]
-
-    def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
-        s_values = tf.squeeze(self.critic.model(s_batch))
-        ns_values = tf.squeeze(self.critic.model(ns_batch))
-
-        tds = r_batch + self.gamma * ns_values * (1. - d_batch) - s_values
-        adv = PPOAgent.discount(tds.numpy(), self.gamma * self.lmbda)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-6)   #sometimes helpful
-        return adv
-
-    def save_model(self, path, actorfile, criticfile, bufferfile=None):
-        actor_fname = path + actorfile
-        critic_fname = path + criticfile
-
-        self.actor.save_weights(actor_fname)
-        self.critic.save_weights(critic_fname)
-
-        if bufferfile is not None:
-            buffer_fname = path + bufferfile
-            self.buffer.save_data(buffer_fname)
-
-    def load_model(self, path, actorfile, criticfile, bufferfile=None):
-
-        actor_fname = path + actorfile
-        critic_fname = path + criticfile
-
-        self.actor.load_weights(actor_fname)
-        self.critic.load_weights(critic_fname)
-
-        if bufferfile is not None:
-            buffer_fname = path + bufferfile
-            self.buffer.load_data(buffer_fname)
-
-        print('Model Parameters are loaded ...')
-
-
-##################
-def collect_trajectories(env, agent, max_episodes):
-    ep_reward_list = []
-    steps = 0
-    for ep in range(max_episodes):
-        state = env.reset()
-        t = 0
-        ep_reward = 0
+    def run_batch(self):
+        state = self.env.reset()
+        # state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+        done, score, SAVING = False, 0, ''
+        scores = deque(maxlen=100)
+        best_score = -np.inf
         while True:
-            action = agent.policy(state)
-            next_state, reward, done, _ = env.step(action)
-            agent.buffer.record(state, action, reward, next_state, done)
-            ep_reward += reward
-            state = next_state
-            t += 1
-            if done:
-                ep_reward_list.append(ep_reward)
-                steps += t
+            # Instantiate or reset games memory
+            states, next_states, actions, rewards, dones = [], [], [], [], []
+            for t in range(self.training_batch):
+                if self.episode % 100 < 5:
+                    env.render()
+                action = self.policy(state)
+                next_state, reward, done, _ = self.env.step(action)
+                # next_state = np.asarray(next_state, dtype=np.float32) / 255.0
+
+                states.append(state)
+                next_states.append(next_state)
+                actions.append(action)
+                rewards.append(reward)
+                dones.append(done)
+
+                state = next_state
+                score += reward
+
+                if done:
+                    self.episode += 1
+                    scores.append(score)
+                    average = np.mean(scores)
+                    if average > best_score and self.episode > 100:
+                        # print("Updated best score: {}->{}".format(best_score, average))
+                        best_score = average
+                        SAVING = "updated!"
+                    print("episode: {}/{}, score: {}, average: {:.2f} {}".format(self.episode, self.EPISODES, score,
+                                                                                 average, SAVING))
+
+                    state, done, score, SAVING = self.env.reset(), False, 0, ''
+                    # state = np.asarray(state, dtype=np.float32) / 255.0
+
+            self.replay(states, actions, rewards, dones, next_states)
+            if best_score > self.success_value:
+                print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
+                break
+            if self.episode >= self.EPISODES:
                 break
 
-    mean_ep_reward = np.mean(ep_reward_list)
-    return steps, mean_ep_reward
-
-# This includes seasons for training
-def main1(env, agent):
-
-    path = './'
-    if agent.method == 'clip':
-        outfile = open(path + 'result_'+'clip_1'+'.txt', 'w')
-    else:
-        outfile = open(path + 'result_'+'klp_1'+'.txt', 'w')
-
-    # training
-
-    total_steps = 0
-    best_score = -np.inf
-    for s in range(MAX_SEASONS):
-        t, s_reward = collect_trajectories(env, agent, TRAIN_EPISODES)
-
-        a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS)
-
-        total_steps += t
-
-        print('Season:{}, Episodes:{}, Training_steps:{}, mean_ep_reward:{:.2f}' \
-              .format(s, (s + 1) * TRAIN_EPISODES, total_steps, s_reward))
-
-        # if best_score < s_reward:
-        #     best_score = s_reward
-        #     agent.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
-        #     print('*** Season: {}, best score:{} Model Saved ***'.format(s, best_score))
-
-        if agent.method == 'penalty':
-            outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_reward,
-                                            a_loss, c_loss, kld_value, agent.actor.lam))
-        else:
-            outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_reward,
-                                                                a_loss, c_loss, kld_value))
-
-        if s_reward > 250:
-            print('Problem is solved in {} seasons involving {} steps'.format(s, total_steps))
-            agent.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
-            break
-
-    env.close()
-    outfile.close()
+        self.env.close()
 
 
-# this is standard approach where the model goes through training over episodes
-def main2(env, agent):
+if __name__ == "__main__":
 
-    path = './'
-    if agent.method == 'clip':
-        outfile = open(path + 'result_'+'clip_2'+'.txt', 'w')
-    else:
-        outfile = open(path + 'result_'+'klp_2'+'.txt', 'w')
+    ##### Hyper-parameters
+    EPISODES = 20000
+    success_value = 250
+    lr = 0.0002
+    epochs = 10
+    training_batch = 1024
+    batch_size = 64
 
-    # training
-    max_episodes = 10000
-    total_steps = 0
-    best_score = -np.inf
-    ep_reward_list = deque(maxlen=40)
-    for ep in range(max_episodes):
-        state = env.reset()
-        ep_reward = 0
-        t = 0
-        mean_a_loss = 0
-        mean_c_loss = 0
-        mean_kl_value = 0
-        while True:
-            action = agent.policy(state)
-            next_state, reward, done, info = env.step(action)
-            agent.buffer.record(state, action, reward, next_state, done)
-
-            # train
-            a_loss, c_loss, kld_value = agent.train(training_epochs=TRAIN_EPOCHS, tmax=1000)
-
-            ep_reward += reward
-            mean_a_loss += a_loss
-            mean_c_loss += c_loss
-            mean_kl_value += kld_value
-
-            state = next_state
-            t += 1
-
-            if done:
-                ep_reward_list.append(ep_reward)
-                print("Episode: {}, Reward: {}".format(ep, ep_reward))
-                mean_a_loss /= t
-                mean_c_loss /= t
-                mean_kl_value /= t
-                total_steps += t
-                break
-
-        if ep > 100 and ep % 20 == 0:
-            test_score = validate(env, agent)
-            if best_score < test_score:
-                best_score = test_score
-                agent.best_ep_reward = best_score
-                agent.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
-                print('*** Episode: {}, validation_score: {}. Model saved. ***'.format(ep, best_score))
-
-        # if ep % 100 == 0:
-        #     print('Episode:{}, ep_reward:{:.2f}, avg_reward:{:.2f} \n'
-        #           .format(ep, ep_reward, np.mean(ep_reward_list)))
-
-        if agent.method == 'penalty':
-            outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(ep, ep_reward,
-                                    np.mean(ep_reward_list), mean_a_loss, mean_c_loss,
-                                                            mean_kl_value, agent.actor.lam))
-        else:
-            outfile.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(ep, ep_reward,
-                                            np.mean(ep_reward_list), mean_a_loss,
-                                                        mean_c_loss, mean_kl_value))
-
-        if ep > 100 and best_score > 250:
-            print('Problem is solved in {} seasons involving {} steps with avg reward {}'
-                  .format(ep, total_steps, np.mean(ep_reward_list)))
-            break
-
-    env.close()
-    outfile.close()
-
-# test a model
-def test(env, agent):
-    path = './'
-    agent.load_model(path, 'actor_weights.h5', 'critic_weights.h5')
-    ep_reward_list = []
-    for ep in range(10):
-        state = env.reset()
-        ep_reward = 0
-        t = 0
-        while True:
-            env.render()
-            action = agent.policy(state)
-            next_state, reward, done, info = env.step(action)
-            ep_reward += reward
-            t += 1
-            state = next_state
-            if done:
-                ep_reward_list.append(ep_reward)
-                print('Episode: {}, Reward: {}'.format(ep, ep_reward))
-                break
-
-    print('Avg episodic reward: ', np.mean(ep_reward_list))
-    env.close()
-
-# used for validating
-def validate(env, agent, ep_max=50):
-    print("Validating...")
-    ep_reward_list = []
-    for ep in range(ep_max):
-        state = env.reset()
-        ep_reward = 0
-        t = 0
-        while True:
-            if ep > ep_max-6:
-                env.render()
-            action = agent.policy(state)
-            next_state, reward, done, info = env.step(action)
-            ep_reward += reward
-            t += 1
-            state = next_state
-            if done:
-                ep_reward_list.append(ep_reward)
-                break
-
-    print(np.mean(ep_reward_list))
-    return np.mean(ep_reward_list)
-
-
-
-####################################
-### MAIN FUNCTION
-################################
-
-if __name__ == '__main__':
-
-    # Gym Environment
-    env = gym.make('Pendulum-v0')
-    #env = gym.make('BipedalWalker-v3')
+    #env = gym.make('Pendulum-v0')
+    env = gym.make('BipedalWalker-v3')
     #env = gym.make('LunarLanderContinuous-v2')
     #env = gym.make('MountainCarContinuous-v0')
-    state_dim = env.observation_space.shape
-    action_dim = env.action_space.shape
-    action_bound = env.action_space.high
-
-    # create an agent
-    agent = PPOAgent(state_dim, action_dim, BATCH_SIZE, MAX_BUFFER_SIZE,
-                     action_bound,
-                     LR_A, LR_C, GAMMA, LAM, EPSILON, KL_TARGET, METHOD)
-
-    # training with seasons
-    # main1(env, agent)
-
-    # training with episodes
-    main2(env, agent)
-
-    # test
-    # test(env, agent)
+    agent = PPOAgent(env, EPISODES, success_value, lr, epochs, training_batch, batch_size)
+    agent.run_batch()  # train as PPO
