@@ -63,6 +63,19 @@ class FeatureNetwork:
         img_input = layers.Input(shape=self.state_size)
 
         # CNN
+
+        # # shared convolutional layers
+        # conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
+        #                       padding="SAME", activation="relu")(img_input)
+        # bn1 = layers.BatchNormalization()(conv1)
+        # conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn1)
+        # bn2 = layers.BatchNormalization()(conv2)
+        # conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+        #                       padding="SAME", activation='relu')(bn2)
+        # bn3 = layers.BatchNormalization()(conv3)
+        # # f1 = layers.Flatten()(bn3)
+
         # shared convolutional layers
         conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(img_input)
@@ -84,16 +97,13 @@ class FeatureNetwork:
         f1 = layers.Flatten()(bn3)
 
         # Attention
-        embedded_sequences = layers.Embedding(1024, 64)(f1)
-        lstm = layers.Bidirectional(layers.LSTM(64, return_sequences=True))(embedded_sequences)
-        # Getting our LSTM outputs
-        (lstm, forward_h, forward_c, backward_h, backward_c) = layers.Bidirectional(layers.LSTM(64, return_sequences=True, return_state=True))(lstm)
-        state_h = layers.Concatenate()([forward_h, backward_h])
-        state_c = layers.Concatenate()([forward_c, backward_c])
-        context_vector = layers.Attention()([lstm, state_h])
+        q = layers.Reshape((4, 16))(f1)
+        att = layers.Attention()([q, q])
+        # att = layers.MultiHeadAttention(num_heads=3, key_dim=2)([q, q])
 
         # Output
-        f2 = layers.Flatten()(context_vector)
+        f2 = layers.Reshape((1, 64))(att)
+        f2 = layers.Flatten()(f2)
         fc1 = layers.Dense(128, activation='relu')(f2)
         fc2 = layers.Dense(64, activation='relu')(fc1)
         model = tf.keras.Model(inputs=[img_input], outputs=fc2)
@@ -105,7 +115,6 @@ class FeatureNetwork:
 
     def __call__(self, state):
         return self.model(state)
-
 
 
 class Actor:
@@ -392,9 +401,8 @@ class PPOAgent:
                 print("Season ", s)
                 print("Updated best score {}->{}, Model saved!".format(best_score, mean_s_score))
                 best_score = mean_s_score
-            s += 1
 
-            if s % 25 == 0:
+            if s % 10 == 0:
                 print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
                 val_score = self.validate(self.env)
                 val_scores.append(val_score)
@@ -408,6 +416,8 @@ class PPOAgent:
                     tf.summary.scalar('3. Validation score', val_score, step=s)
                     tf.summary.scalar('4. Actor Loss', a_loss, step=s)
                     tf.summary.scalar('5. Critic Loss', c_loss, step=s)
+
+            s += 1
 
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
@@ -443,12 +453,12 @@ if __name__ == "__main__":
     ############################
 
     ##### Hyper-parameters
-    EPISODES = 75000
-    success_value = 80
-    lr = 0.0002
+    EPISODES = 50000
+    success_value = 40
+    lr = 0.0003
     epochs = 10
-    training_batch = 1024
-    batch_size = 128
+    training_batch = 1024 // 2
+    batch_size = 128 // 2
     epsilon = 0.05
     gamma = 0.993
     lmbda = 0.7

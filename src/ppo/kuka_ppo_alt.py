@@ -60,37 +60,37 @@ class FeatureNetwork:
     def _build_net(self):
         img_input = layers.Input(shape=self.state_size)
 
-        # shared convolutional layers
-        conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
-                              padding="SAME", activation="relu")(img_input)
-        bn1 = layers.BatchNormalization()(conv1)
-        conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
-                              padding="SAME", activation='relu')(bn1)
-        bn2 = layers.BatchNormalization()(conv2)
-        conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
-                              padding="SAME", activation='relu')(bn2)
-        bn3 = layers.BatchNormalization()(conv3)
-        f1 = layers.Flatten()(bn3)
-
         # # shared convolutional layers
         # conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
         #                       padding="SAME", activation="relu")(img_input)
         # bn1 = layers.BatchNormalization()(conv1)
         # conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
         #                       padding="SAME", activation='relu')(bn1)
+        # bn2 = layers.BatchNormalization()(conv2)
         # conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
-        #                       padding="SAME", activation='relu')(conv2)
-        # # Max pooling here
-        # mp1 = layers.MaxPool2D()(conv3)
-        # bn2 = layers.BatchNormalization()(mp1)
-        # conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
         #                       padding="SAME", activation='relu')(bn2)
-        # conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
-        #                       padding="SAME", activation='relu')(conv4)
-        # # max pooling 2 here
-        # # mp2 = layers.MaxPool2D()(conv5)
-        # bn3 = layers.BatchNormalization()(conv5)
+        # bn3 = layers.BatchNormalization()(conv3)
         # f1 = layers.Flatten()(bn3)
+
+        # shared convolutional layers
+        conv1 = layers.Conv2D(16, kernel_size=5, strides=2,
+                              padding="SAME", activation="relu")(img_input)
+        bn1 = layers.BatchNormalization()(conv1)
+        conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(bn1)
+        conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(conv2)
+        # Max pooling here
+        mp1 = layers.MaxPool2D()(conv3)
+        bn2 = layers.BatchNormalization()(mp1)
+        conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(bn2)
+        conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
+                              padding="SAME", activation='relu')(conv4)
+        # max pooling 2 here
+        # mp2 = layers.MaxPool2D()(conv5)
+        bn3 = layers.BatchNormalization()(conv5)
+        f1 = layers.Flatten()(bn3)
 
         fc1 = layers.Dense(128, activation='relu')(f1)
         fc2 = layers.Dense(64, activation='relu')(fc1)
@@ -353,9 +353,9 @@ class PPOAgent:
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
-        val_scores = deque(maxlen=100)
+        val_scores = deque(maxlen=25)
         s = 0
-        s_scores = deque(maxlen=100)  # Last 100 season scores
+        s_scores = deque(maxlen=25)  # Last 100 season scores
         while True:
             # Instantiate or reset games memory
             s_score = 0
@@ -391,7 +391,7 @@ class PPOAgent:
                 best_score = mean_s_score
             s += 1
 
-            if s % 25 == 0:
+            if s % 10 == 0:
                 print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
                 val_score = self.validate(self.env)
                 val_scores.append(val_score)
@@ -442,7 +442,7 @@ if __name__ == "__main__":
     ##### Hyper-parameters
     EPISODES = 75000
     success_value = 80
-    lr = 0.0002
+    lr = 0.0003
     epochs = 10
     training_batch = 1024
     batch_size = 128

@@ -214,11 +214,11 @@ class Critic:
 
         return model
 
-    def train(self, states, returns, goals, esil_loss):
+    def train(self, states, returns, goals):
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
             critic_value = tf.squeeze(self.model([states, goals]))
-            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value)) # + esil_loss
+            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
@@ -343,7 +343,7 @@ class PPOAgent:
                 esil_loss *= esil_beta
 
                 # Update critic
-                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i], esil_loss)
+                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i])
                 c_loss_list.append(c_loss)
                 # Update actor
                 a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss, g_split[i], esil_loss)
@@ -392,7 +392,6 @@ class PPOAgent:
         g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
         state = self.env.reset()
         state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
-        ag = state  # Achieved goal
 
         done, score = False, 0
         best_score = -np.inf
@@ -404,13 +403,12 @@ class PPOAgent:
             # Instantiate or reset games memory
             count = 0
             s_score = 0
-            states, next_states, actions, rewards, dones, goals, a_goals = [], [], [], [], [], [], []
+            states, next_states, actions, rewards, dones, goals = [], [], [], [], [], []
             hind_rewards, hind_goals = [], []
             for t in range(self.training_batch):  # self.training_batch
                 action = self.policy(state, g)
                 next_state, reward, done, _ = self.env.step(action)
                 next_state = np.asarray(next_state, dtype=np.float32) / 255.0
-                next_ag = next_state
 
                 states.append(state)
                 next_states.append(next_state)
@@ -418,17 +416,17 @@ class PPOAgent:
                 rewards.append(reward)
                 dones.append(done)
                 goals.append(g)
-                a_goals.append(ag)
                 count += 1
 
                 state = next_state
-                ag = next_ag
                 score += reward
                 s_score += reward
 
                 if done:
+                    # Collect hindsight experience
                     for i in range(count):
-                        hind_goals.append(ag)
+                        # Achieved goal is the final state
+                        hind_goals.append(state)
                         hind_rewards.append(1) if dones[i] else hind_rewards.append(0)
                     count = 0
 
@@ -437,11 +435,10 @@ class PPOAgent:
                     g = np.asarray(g, dtype=np.float32) / 255.0
                     state, done, score = self.env.reset(), False, 0
                     state = np.asarray(state, dtype=np.float32) / 255.0
-                    ag = state
 
             # Fill in left over space
             for i in range(len(states) - len(hind_rewards)):
-                hind_goals.append(ag)
+                hind_goals.append(state)
                 hind_rewards.append(1) if dones[-i] else hind_rewards.append(0)
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states,
