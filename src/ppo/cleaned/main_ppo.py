@@ -41,17 +41,17 @@ if __name__ == "__main__":
 
     # #### Hyper-parameters
     EPISODES = 75000
-    success_value = 0.9
-    lr_a = 0.0001
+    success_value = 90
+    lr_a = 0.0003
     lr_c = 0.0002
-    epochs = 20  # 10
-    training_batch = 1024 // 2
-    batch_size = 128 // 2
-    epsilon = 0.05
+    epochs = 10
+    training_batch = 1024
+    batch_size = 128
+    epsilon = 0.07
     gamma = 0.993
     lmbda = 0.7
 
-    use_attention = False  # enable/disable for attention model
+    use_attention = True  # enable/disable for attention model
 
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,

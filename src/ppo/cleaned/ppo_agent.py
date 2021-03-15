@@ -40,6 +40,8 @@ class Actor:
 
         net_out = net_out * self.upper_bound  # element-wise product
         model = tf.keras.Model(state_input, net_out)
+        tf.keras.utils.plot_model(model, to_file='actor_net.png',
+                                  show_shapes=True, show_layer_names=True)
         model.summary()
 
         return model
@@ -102,6 +104,8 @@ class Critic:
 
         # Outputs single value for a given state = V(s)
         model = tf.keras.Model(inputs=state_input, outputs=net_out)
+        tf.keras.utils.plot_model(model, to_file='critic_net.png',
+                                  show_shapes=True, show_layer_names=True)
         model.summary()
 
         return model
@@ -304,8 +308,12 @@ class PPOAgent:
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states)
 
+            # Decay variables
+            # self.actor.epsilon *= 0.999
+            # self.actor.entropy_coeff *= 0.998
+
             # After season
-            s_score = s_score / sum(dones)
+            success_rate = s_score / sum(dones)
             s_scores.append(s_score)
             mean_s_score = np.mean(s_scores)
             if mean_s_score > best_score:
@@ -326,9 +334,10 @@ class PPOAgent:
                 with train_summary_writer.as_default():
                     tf.summary.scalar('1. Season score', s_score, step=s)
                     tf.summary.scalar('2. Average Season Score', mean_s_score, step=s)
-                    tf.summary.scalar('3. Validation score', val_score, step=s)
-                    tf.summary.scalar('4. Actor Loss', a_loss, step=s)
-                    tf.summary.scalar('5. Critic Loss', c_loss, step=s)
+                    tf.summary.scalar('3. Success rate', success_rate, step=s)
+                    tf.summary.scalar('4. Validation score', val_score, step=s)
+                    tf.summary.scalar('5. Actor Loss', a_loss, step=s)
+                    tf.summary.scalar('6. Critic Loss', c_loss, step=s)
 
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))

@@ -372,7 +372,7 @@ class PPOESILAgent:
                                          goals, hind_rewards, hind_goals)
 
             # After season
-            s_score = s_score / sum(dones)
+            success_rate = s_score / sum(dones)
             s_scores.append(s_score)
             mean_s_score = np.mean(s_scores)
             if mean_s_score > best_score:
@@ -392,9 +392,10 @@ class PPOESILAgent:
                 with train_summary_writer.as_default():
                     tf.summary.scalar('1. Season score', s_score, step=s)
                     tf.summary.scalar('2. Average Season Score', mean_s_score, step=s)
-                    tf.summary.scalar('3. Validation score', val_score, step=s)
-                    tf.summary.scalar('4. Actor Loss', a_loss, step=s)
-                    tf.summary.scalar('5. Critic Loss', c_loss, step=s)
+                    tf.summary.scalar('3. Success rate', success_rate, step=s)
+                    tf.summary.scalar('4. Validation score', val_score, step=s)
+                    tf.summary.scalar('5. Actor Loss', a_loss, step=s)
+                    tf.summary.scalar('6. Critic Loss', c_loss, step=s)
 
             s += 1
 
