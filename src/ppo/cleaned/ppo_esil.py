@@ -141,13 +141,13 @@ class Critic:
 
 
 class PPOESILAgent:
-    def __init__(self, env, EPISODES, success_value, lr_a, lr_c, epochs,
+    def __init__(self, env, SEASONS, success_value, lr_a, lr_c, epochs,
                  training_batch, batch_size, epsilon, gamma, lmbda, use_attention):
         self.env = env
         self.action_size = self.env.action_space.shape[0]
         self.state_size = self.env.observation_space.shape
         self.upper_bound = self.env.action_space.high
-        self.EPISODES = EPISODES
+        self.SEASONS = SEASONS
         self.episode = 0
         self.replay_count = 0
         self.success_value = success_value
@@ -323,9 +323,9 @@ class PPOESILAgent:
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
-        val_scores = deque(maxlen=25)
+        val_scores = deque(maxlen=50)
         s = 0
-        s_scores = deque(maxlen=25)  # Last 100 season scores
+        s_scores = deque(maxlen=50)  # Last n season scores
         while True:
             # Instantiate or reset games memory
             count = 0
@@ -402,7 +402,7 @@ class PPOESILAgent:
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
                 break
-            if self.episode >= self.EPISODES:
+            if s >= self.SEASONS:
                 break
 
         self.env.close()

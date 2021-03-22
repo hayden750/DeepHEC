@@ -128,13 +128,13 @@ class Critic:
 
 
 class PPOAgent:
-    def __init__(self, env, EPISODES, success_value, lr_a, lr_c, epochs,
+    def __init__(self, env, SEASONS, success_value, lr_a, lr_c, epochs,
                  training_batch, batch_size, epsilon, gamma, lmbda, use_attention):
         self.env = env
         self.action_size = self.env.action_space.shape[0]
         self.state_size = self.env.observation_space.shape
         self.upper_bound = self.env.action_space.high
-        self.EPISODES = EPISODES
+        self.SEASONS = SEASONS
         self.episode = 0
         self.replay_count = 0
         self.success_value = success_value
@@ -152,9 +152,9 @@ class PPOAgent:
 
         # Create Actor-Critic network models
         if self.use_attention:
-            self.feature = AttentionFeatureNetwork(self.state_size)
+            self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
         else:
-            self.feature = FeatureNetwork(self.state_size)
+            self.feature = FeatureNetwork(self.state_size, lr_a)
 
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
                            epsilon=self.epsilon, feature=self.feature)
@@ -169,6 +169,12 @@ class PPOAgent:
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
 
         mean, std = self.actor(tf_state)
+
+        # pi = tfp.distributions.Normal(mean, std)
+        # action = pi.sample()
+        #
+        # valid_action = tf.clip_by_value(action, -self.upper_bound, self.upper_bound)
+        # return valid_action.numpy()
 
         action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
         action = np.clip(action, -self.upper_bound, self.upper_bound)
@@ -279,9 +285,9 @@ class PPOAgent:
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
-        val_scores = deque(maxlen=25)
+        val_scores = deque(maxlen=50)
         s = 0
-        s_scores = deque(maxlen=25)  # Last n season scores
+        s_scores = deque(maxlen=50)  # Last n season scores
         while True:
             # Instantiate or reset games memory
             s_score = 0
@@ -342,7 +348,7 @@ class PPOAgent:
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
                 break
-            if self.episode >= self.EPISODES:
+            if s >= self.SEASONS:
                 break
 
         self.env.close()

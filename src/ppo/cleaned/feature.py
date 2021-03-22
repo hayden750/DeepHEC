@@ -4,7 +4,7 @@ from tensorflow.keras import layers
 
 
 class BasicFeatureNetwork:
-    def __init__(self, state_size, learning_rate=1e-3):
+    def __init__(self, state_size, learning_rate=2e-4):
         print("Initialising Feature network")
         self.state_size = state_size
         self.lr = learning_rate
@@ -40,7 +40,7 @@ class BasicFeatureNetwork:
 
 
 class FeatureNetwork:
-    def __init__(self, state_size, learning_rate=1e-3):
+    def __init__(self, state_size, learning_rate=2e-4):
         print("Initialising Feature network")
         self.state_size = state_size
         self.lr = learning_rate
@@ -84,7 +84,7 @@ class FeatureNetwork:
 
 
 class AttentionFeatureNetwork:
-    def __init__(self, state_size, learning_rate=1e-3):
+    def __init__(self, state_size, learning_rate=2e-4):
         print("Initialising Feature network")
         self.state_size = state_size
         self.lr = learning_rate
@@ -116,7 +116,7 @@ class AttentionFeatureNetwork:
 
         # Attention
         q = layers.Reshape((4, 16))(f1)
-        att = layers.Attention()([q, q])
+        att = layers.Attention()([q, q, q])
         # att = layers.MultiHeadAttention(num_heads=3, key_dim=2)([q, q])
 
         # Output
