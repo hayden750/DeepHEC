@@ -2,6 +2,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
+from attention import SeqSelfAttention
+
 
 class BasicFeatureNetwork:
     def __init__(self, state_size, learning_rate=2e-4):
@@ -26,7 +28,7 @@ class BasicFeatureNetwork:
                               padding="SAME", activation='relu')(bn2)
         bn3 = layers.BatchNormalization()(conv3)
         f1 = layers.Flatten()(bn3)
-        fc1 = layers.Dense(128, activation='relu')(f1)
+        fc1 = layers.Dense(64, activation='relu')(f1)
         fc2 = layers.Dense(64, activation='relu')(fc1)
         model = tf.keras.Model(inputs=img_input, outputs=fc2)
         print('shared feature network')
@@ -58,20 +60,20 @@ class FeatureNetwork:
         bn1 = layers.BatchNormalization()(conv1)
         conv2 = layers.Conv2D(32, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(bn1)
-        conv3 = layers.Conv2D(64, kernel_size=5, strides=2,
+        conv3 = layers.Conv2D(32, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(conv2)
         mp1 = layers.MaxPool2D(padding="SAME")(conv3)
         bn2 = layers.BatchNormalization()(mp1)
-        conv4 = layers.Conv2D(128, kernel_size=5, strides=2,
+        conv4 = layers.Conv2D(64, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(bn2)
-        conv5 = layers.Conv2D(128, kernel_size=5, strides=2,
+        conv5 = layers.Conv2D(64, kernel_size=5, strides=2,
                               padding="SAME", activation='relu')(conv4)
         mp2 = layers.MaxPool2D(padding="SAME")(conv5)
         bn3 = layers.BatchNormalization()(mp2)
         f1 = layers.Flatten()(bn3)
 
         fc1 = layers.Dense(128, activation='relu')(f1)
-        fc2 = layers.Dense(64, activation='relu')(fc1)
+        fc2 = layers.Dense(128, activation='relu')(fc1)
         model = tf.keras.Model(inputs=img_input, outputs=fc2)
         print('shared feature network')
         model.summary()
@@ -116,14 +118,15 @@ class AttentionFeatureNetwork:
 
         # Attention
         q = layers.Reshape((4, 16))(f1)
-        att = layers.Attention()([q, q, q])
-        # att = layers.MultiHeadAttention(num_heads=3, key_dim=2)([q, q])
+        # att = layers.Attention()([q, q, q])
+        # att = layers.MultiHeadAttention(num_heads=3, key_dim=2)(q, q, q)
+        att = SeqSelfAttention()(q)  # Ardhendu CAP Sequence Attention
 
         # Output
         f2 = layers.Reshape((1, 64))(att)
         f2 = layers.Flatten()(f2)
         fc1 = layers.Dense(128, activation='relu')(f2)
-        fc2 = layers.Dense(64, activation='relu')(fc1)
+        fc2 = layers.Dense(128, activation='relu')(fc1)  # 64
         model = tf.keras.Model(inputs=[img_input], outputs=fc2)
         print('shared feature attention network')
         model.summary()
@@ -133,4 +136,5 @@ class AttentionFeatureNetwork:
 
     def __call__(self, state):
         return self.model(state)
+
 

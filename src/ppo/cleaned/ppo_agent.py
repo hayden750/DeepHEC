@@ -274,7 +274,7 @@ class PPOAgent:
         ############################
         path = './'
 
-        filename = path + 'result_ppo_clip.txt'
+        filename = path + str(self.use_attention) + 'result_ppo_clip.txt'
         if os.path.exists(filename):
             os.remove(filename)
         else:
@@ -344,6 +344,9 @@ class PPOAgent:
                     tf.summary.scalar('4. Validation score', val_score, step=s)
                     tf.summary.scalar('5. Actor Loss', a_loss, step=s)
                     tf.summary.scalar('6. Critic Loss', c_loss, step=s)
+
+            with open(filename, 'a') as file:
+                file.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_score, mean_s_score, a_loss, c_loss))
 
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))

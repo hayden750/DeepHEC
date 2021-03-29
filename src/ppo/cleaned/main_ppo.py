@@ -40,8 +40,8 @@ if __name__ == "__main__":
     print('Found GPU at: {}'.format(device_name))
 
     # #### Hyper-parameters
-    SEASONS = 1000
-    success_value = 100
+    SEASONS = 100
+    success_value = 70
     lr_a = 0.0002  # 0.001
     lr_c = 0.0002  # 0.001
     epochs = 10
@@ -59,10 +59,10 @@ if __name__ == "__main__":
                                removeHeightHack=False)
 
     # PPO Agent
-    agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-                     lmbda, use_attention)
+    # agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    #                  lmbda, use_attention)
     # ESIL Agent
-    # agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                      lmbda, use_attention)
+    agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+                         lmbda, use_attention)
 
     agent.run()  # train as PPO
