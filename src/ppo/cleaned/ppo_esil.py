@@ -1,3 +1,5 @@
+""" https://github.com/TianhongDai/esil-hindsight/blob/main/rl_base/ppo_agent.py """
+
 # Imports
 import numpy as np
 import tensorflow as tf
@@ -6,9 +8,10 @@ import tensorflow.keras.backend as K
 from collections import deque
 import os
 import datetime
+import random
 
 # Local Imports
-from feature import BasicFeatureNetwork, FeatureNetwork, AttentionFeatureNetwork
+from feature import ESILFeatureNetwork, ESILAttentionNetwork
 
 
 class Actor:
@@ -34,10 +37,9 @@ class Actor:
         state_input = tf.keras.layers.Input(shape=self.state_size)
         g_input = tf.keras.layers.Input(shape=self.state_size)
 
-        f_image = self.feature_model(state_input)
-        f_goal = self.feature_model(g_input)
-        f = layers.Concatenate()([f_image, f_goal])
-        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
+        feature = self.feature_model([state_input, g_input])
+
+        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(feature)
         f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
         net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
                                         kernel_initializer=last_init, trainable=True)(f)
@@ -45,8 +47,8 @@ class Actor:
         net_out = net_out * self.upper_bound  # element-wise product
         model = tf.keras.Model([state_input, g_input], net_out)
         model.summary()
-        keras.utils.plot_model(model, to_file='actor_net.png',
-                               show_shapes=True, show_layer_names=True)
+        tf.keras.utils.plot_model(model, to_file='actor_net.png',
+                                  show_shapes=True, show_layer_names=True)
 
         return model
 
@@ -106,9 +108,7 @@ class Critic:
         state_input = tf.keras.layers.Input(shape=self.state_size)
         g_input = tf.keras.layers.Input(shape=self.state_size)
 
-        f_image = self.feature_model(state_input)
-        f_goal = self.feature_model(g_input)
-        feature = layers.Concatenate()([f_image, f_goal])
+        feature = self.feature_model([state_input, g_input])
 
         out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
@@ -118,16 +118,17 @@ class Critic:
         # Outputs single value for a given state = V(s)
         model = tf.keras.Model(inputs=[state_input, g_input], outputs=net_out)
         model.summary()
-        keras.utils.plot_model(model, to_file='critic_net.png',
-                               show_shapes=True, show_layer_names=True)
+        tf.keras.utils.plot_model(model, to_file='critic_net.png',
+                                  show_shapes=True, show_layer_names=True)
 
         return model
 
-    def train(self, states, returns, goals):
+    def train(self, states, returns, goals, esil_loss):
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
             critic_value = tf.squeeze(self.model([states, goals]))
             critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
+            critic_loss += esil_loss
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
@@ -165,10 +166,10 @@ class PPOESILAgent:
 
         # Create Actor-Critic network models
         if self.use_attention:
-            self.feature = AttentionFeatureNetwork(self.state_size)
+            self.feature = ESILAttentionNetwork(self.state_size)
         else:
             # self.feature = BasicFeatureNetwork(self.state_size)
-            self.feature = FeatureNetwork(self.state_size)
+            self.feature = ESILFeatureNetwork(self.state_size)
 
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
                            epsilon=self.epsilon, feature=self.feature)
@@ -207,6 +208,22 @@ class PPOESILAgent:
         adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-10)  # output: numpy array
         return adv, returns
 
+    def compute_esil_loss(self, states, hind_goals, hind_returns, returns, a_split, n_samples):
+
+        # current hindsight policy
+        hind_mean, hind_std = self.actor(states, hind_goals)
+        hind_pi = tfp.distributions.Normal(hind_mean, hind_std)
+
+        masks = np.asarray((hind_returns > returns), dtype=np.float32)
+        num_clone_samples = np.sum(masks)
+        tf_masks = tf.convert_to_tensor(masks, dtype=tf.float32)
+        masks_stack = tf.stack([tf_masks, tf_masks, tf_masks], axis=1)
+        log_prob_clone = hind_pi.log_prob(tf.squeeze(a_split))
+        num_clone_samples = np.max([num_clone_samples, 1])
+        esil_loss = -np.sum(log_prob_clone * masks_stack) / (3 * num_clone_samples)
+        esil_loss *= (num_clone_samples / n_samples)  # esil beta
+        return esil_loss
+
     def replay(self, states, actions, rewards, dones, next_states,
                goals, hind_rewards, hind_goals):
 
@@ -232,15 +249,12 @@ class PPOESILAgent:
         adv_split = tf.split(advantages, n_split)
         g_split = tf.split(goals, n_split)
         hind_t_split = tf.split(hind_target, n_split)
+        hind_g_split = tf.split(hind_goals, n_split)
         indexes = np.arange(n_split, dtype=int)
 
         # current policy
         mean, std = self.actor(states, goals)
         pi = tfp.distributions.Normal(mean, std)
-
-        # current hindsight policy
-        hind_mean, hind_std = self.actor(states, hind_goals)
-        hind_pi = tfp.distributions.Normal(hind_mean, hind_std)
 
         a_loss_list = []
         c_loss_list = []
@@ -249,19 +263,15 @@ class PPOESILAgent:
         for _ in range(self.epochs):
             for i in indexes:
                 old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
-                hind_old_pi = hind_pi[i * self.batch_size: (i + 1) * self.batch_size]
 
                 # Calculate esil loss
-                traj_sel = np.asarray((hind_t_split[i] > t_split[i]), dtype=np.float32)
-                traj_sel = tf.convert_to_tensor(traj_sel, dtype=tf.float32)
-                traj_stack = tf.stack([traj_sel, traj_sel, traj_sel], axis=1)
-                esil_loss = - np.sum(hind_old_pi.log_prob(tf.squeeze(a_split[i])) * traj_stack) / n_samples
-                esil_beta = np.sum(traj_sel) / len(traj_sel)
-                esil_loss *= esil_beta
+                esil_loss = self.compute_esil_loss(s_split[i], hind_g_split[i], hind_t_split[i], t_split[i], a_split[i],
+                                                   len(s_split[i]))
 
                 # Update critic
-                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i])
+                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i], esil_loss)
                 c_loss_list.append(c_loss)
+                c_loss -= esil_loss  # Subtract esil loss so it is not added twice in actor update
                 # Update actor
                 a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss, g_split[i], esil_loss)
                 a_loss_list.append(a_loss)
@@ -276,15 +286,15 @@ class PPOESILAgent:
         ep_reward_list = []
         for ep in range(max_eps):
             g = env.reset()
-            g = np.ascontiguousarray(g, dtype=np.float32) / 255.0  # convert into float array
+            g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
             obsv = env.reset()
-            state = np.ascontiguousarray(obsv, dtype=np.float32) / 255.0  # convert into float array
+            state = np.asarray(obsv, dtype=np.float32) / 255.0  # convert into float array
             t = 0
             ep_reward = 0
             while True:
                 action = self.policy(state, g)
                 next_obsv, reward, done, _ = env.step(action)
-                next_state = np.ascontiguousarray(next_obsv, dtype=np.float32) / 255.0
+                next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0
                 state = next_state
                 ep_reward += reward
                 t += 1
@@ -309,14 +319,19 @@ class PPOESILAgent:
 
         path = './'
 
-        filename = path + 'result_ppo_clip.txt'
+        filename = path + str(self.use_attention) + 'result_ppo_esil.txt'
         if os.path.exists(filename):
             os.remove(filename)
         else:
             print('The file does not exist. It will be created.')
 
-        g = self.env.reset()  # Desired goal
+        # Initialise random desired goal
+        g = self.env.reset()
+        steps = random.randint(0, 7)
+        for _ in range(steps):
+            g, _, _, _ = self.env.step(self.env.action_space.sample())
         g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+
         state = self.env.reset()
         state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
 
@@ -325,7 +340,7 @@ class PPOESILAgent:
         val_score = -np.inf
         val_scores = deque(maxlen=50)
         s = 0
-        s_scores = deque(maxlen=50)  # Last n season scores
+        s_scores = deque(maxlen=50)  # Last 50 season scores
         while True:
             # Instantiate or reset games memory
             count = 0
@@ -352,14 +367,17 @@ class PPOESILAgent:
                 if done:
                     # Collect hindsight experience
                     for i in range(count):
-                        # Achieved goal is the final state
+                        # Achieved goal is the final state of the episode
                         hind_goals.append(state)
                         hind_rewards.append(1) if dones[i] else hind_rewards.append(0)
                     count = 0
 
                     self.episode += 1
                     g = self.env.reset()
-                    g = np.asarray(g, dtype=np.float32) / 255.0
+                    steps = random.randint(0, 7)
+                    for _ in range(steps):
+                        g, _, _, _ = self.env.step(self.env.action_space.sample())
+                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
                     state, done, score = self.env.reset(), False, 0
                     state = np.asarray(state, dtype=np.float32) / 255.0
 
@@ -396,6 +414,9 @@ class PPOESILAgent:
                     tf.summary.scalar('4. Validation score', val_score, step=s)
                     tf.summary.scalar('5. Actor Loss', a_loss, step=s)
                     tf.summary.scalar('6. Critic Loss', c_loss, step=s)
+
+            with open(filename, 'a') as file:
+                file.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_score, mean_s_score, a_loss, c_loss))
 
             s += 1
 

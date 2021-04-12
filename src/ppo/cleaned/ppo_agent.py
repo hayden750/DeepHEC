@@ -8,7 +8,7 @@ import os
 import datetime
 
 # Local Imports
-from feature import FeatureNetwork, AttentionFeatureNetwork
+from feature import FeatureNetwork, AttentionFeatureNetwork, AttFeatureNetwork
 
 
 class Actor:
@@ -153,6 +153,7 @@ class PPOAgent:
         # Create Actor-Critic network models
         if self.use_attention:
             self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
+            # self.feature = AttFeatureNetwork(self.state_size, lr_a)
         else:
             self.feature = FeatureNetwork(self.state_size, lr_a)
 
@@ -327,7 +328,6 @@ class PPOAgent:
                 print("Season ", s)
                 print("Updated best score {}->{}, Model saved!".format(best_score, mean_s_score))
                 best_score = mean_s_score
-            s += 1
 
             if s % 10 == 0:
                 print("Season {} score: {}, Mean score: {}".format(s, s_score, mean_s_score))
@@ -347,6 +347,8 @@ class PPOAgent:
 
             with open(filename, 'a') as file:
                 file.write('{}\t{:.2f}\t{:.2f}\t{:.2f}\t{:.2f}\n'.format(s, s_score, mean_s_score, a_loss, c_loss))
+
+            s += 1
 
             if best_score > self.success_value:
                 print("Problem solved in {} episodes with score {}".format(self.episode, best_score))
