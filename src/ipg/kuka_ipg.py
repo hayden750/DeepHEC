@@ -10,7 +10,6 @@ import os
 import datetime
 import random
 
-import tensorflow as tf
 from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
 from packaging import version
 
@@ -142,7 +141,7 @@ class Actor:
 
         return model
 
-    def train(self, states, advantages, actions, old_pi, ls, b, critic, s_batch):
+    def train(self, states, advantages, actions, old_pi, critic, b, s_batch):
 
         with tf.GradientTape() as tape:
             mean = tf.squeeze(self.model(states))
@@ -153,18 +152,20 @@ class Actor:
             ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
                            old_pi.log_prob(tf.squeeze(actions)))
 
-            # adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
+            adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
 
-            p1 = ratio * advantages
-            p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * advantages
-            l_clip = K.mean(K.minimum(p1, p2))
+            p1 = ratio * adv_stack
+            p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
+            ppo_loss = K.mean(K.minimum(p1, p2))
 
             # Off-policy loss
-            q_values = critic.model([s_batch, mean])
-            sum_q_values = K.sum(q_values)
-            off_loss = (b / len(s_batch)) * sum_q_values
+            mean_off = self.model(s_batch)
+            q_values = critic.model([s_batch, mean_off])
+            sum_q_values = K.sum(K.mean(q_values))
+            off_loss = ((b / len(s_batch)) * sum_q_values)
 
-            actor_loss = -tf.math.reduce_sum(l_clip + off_loss)
+            actor_loss = -tf.reduce_sum(ppo_loss + off_loss)
+            # actor_loss = -ppo_loss
             actor_weights = self.model.trainable_variables
 
         # outside gradient tape
@@ -369,28 +370,23 @@ class QPROPAgent:
         returns = np.array(returns)
         adv = returns - s_values.numpy()  # Q - V
         adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-10)  # output: numpy array
-        return adv, returns, s_values.numpy()
+        return adv, returns
 
     def compute_targets(self, r_batch, ns_batch, d_batch):
         mean = self.actor.model(ns_batch)
-        std = tf.exp(self.actor.model.logstd)
 
-        actions = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
-        actions = np.clip(actions, -self.upper_bound, self.upper_bound)
-
-        target_critic = self.critic.model([ns_batch, actions])
+        target_critic = self.critic.model([ns_batch, mean])
         y = r_batch + self.gamma * (1 - d_batch) * target_critic
         return y
 
     def compute_adv_bar(self, s_batch, a_batch):
         mean = self.actor.model(s_batch)
-        std = tf.exp(self.actor.model.logstd)
+        # std = tf.exp(self.actor.model.logstd)
 
-        actions = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
-        actions = np.clip(actions, -self.upper_bound, self.upper_bound)
-
-        x = a_batch - actions
-        y = self.critic.model([s_batch, actions])
+        # actions = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        # actions = np.clip(actions, -self.upper_bound, self.upper_bound)
+        x = tf.squeeze(a_batch) - tf.squeeze(mean)
+        y = tf.squeeze(self.critic.model([s_batch, mean]))
         adv_bar = y * x
         return adv_bar
 
@@ -398,7 +394,7 @@ class QPROPAgent:
 
         a_loss_list = []
         c_loss_list = []
-        v_loss_list = []
+        # v_loss_list = []
 
         n_split = len(rewards) // self.batch_size
 
@@ -412,27 +408,26 @@ class QPROPAgent:
 
         # Fit baseline using collected experience and compute advantages
         # Update baseline
-        advantages, returns, v_values = self.compute_advantages(rewards, states, next_states, dones)
+        advantages, returns = self.compute_advantages(rewards, states, next_states, dones)
 
         # If use control variate: Compute Critic-based advantages
         # and compute learning signal
         use_CV = False
-        interpolate_ratio = 0.2
-        advantages = tf.stack([advantages, advantages, advantages], axis=1)
+        v = 0.2
         if use_CV:
-          cb_advantages = self.compute_adv_bar(states, actions)
-          ls = advantages - cb_advantages
-          b = 1
+            # Compute critic-based advantage
+            adv_bar = self.compute_adv_bar(states, actions)
+            ls = advantages - adv_bar
+            b = 1
         else:
-          ls = advantages
-          b = interpolate_ratio
+            ls = advantages
+            b = v
 
-        # 5. Multiply ls by 1-v
-        ls *= (1 - interpolate_ratio)
+        ls *= (1 - v)
 
         s_split = tf.split(states, n_split)
         a_split = tf.split(actions, n_split)
-        r_split = tf.split(returns, n_split)
+        t_split = tf.split(returns, n_split)
         adv_split = tf.split(advantages, n_split)
         ls_split = tf.split(ls, n_split)
         indexes = np.arange(n_split, dtype=int)
@@ -441,28 +436,24 @@ class QPROPAgent:
         mean, std = self.actor(states)
         pi = tfp.distributions.Normal(mean, std)
 
-        # 6. Update Networks
+        a_loss, c_loss = 0, 0
+
         np.random.shuffle(indexes)
         for _ in range(self.epochs):
-            # Sample batch from buffer
             s_batch, a_batch, r_batch, ns_batch, d_batch = self.buffer.sample()
-
             for i in indexes:
                 old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
-                a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi,
-                                          ls_split[i], b, self.critic, s_batch)
+                # Update actor
+                a_loss = self.actor.train(s_split[i], ls_split[i], a_split[i], old_pi, self.critic, b, s_batch)
                 a_loss_list.append(a_loss)
+                # Update baseline
+                v_loss = self.baseline.train(s_split[i], t_split[i])
 
-                v_loss = self.baseline.train(s_split[i], r_split[i])
-                v_loss_list.append(v_loss)
-
-            # Compute targets
-            y = self.compute_targets(r_batch, ns_batch, d_batch)
             # Update critic
+            y = self.compute_targets(r_batch, ns_batch, d_batch)
             c_loss = self.critic.train(s_batch, a_batch, y)
             c_loss_list.append(c_loss)
 
-        self.critic.update_target()
         self.replay_count += 1
 
         return np.mean(a_loss_list), np.mean(c_loss_list)
@@ -639,8 +630,8 @@ if __name__ == "__main__":
     lr_c = 0.0002  # 0.001
     epochs = 10
     training_batch = 1024  # 512
-    batch_size = 128
-    epsilon = 0.07  # 0.2
+    batch_size = 64  # 128
+    epsilon = 0.2  # 0.07
     gamma = 0.993  # 0.99
     lmbda = 0.7  # 0.9
 
