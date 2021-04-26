@@ -1,17 +1,18 @@
-""" https://github.com/TianhongDai/esil-hindsight/blob/main/rl_base/ppo_agent.py """
-
 # Imports
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
 import tensorflow.keras.backend as K
+from tensorflow import keras
+from tensorflow.keras import layers
 from collections import deque
 import os
 import datetime
 import random
 
 # Local Imports
-from feature import ESILFeatureNetwork, ESILAttentionNetwork
+from feature import FeatureNetwork, AttentionFeatureNetwork
+from Replay_Buffer import HERBuffer
 
 
 class Actor:
@@ -35,28 +36,30 @@ class Actor:
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
         state_input = tf.keras.layers.Input(shape=self.state_size)
-        g_input = tf.keras.layers.Input(shape=self.state_size)
+        goal_input = tf.keras.layers.Input(shape=self.state_size)
 
-        feature = self.feature_model([state_input, g_input])
+        f1 = self.feature_model(state_input)
+        f2 = self.feature_model(goal_input)
+        f = layers.Concatenate()([f1, f2])
 
-        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(feature)
+        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
         f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
         net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
                                         kernel_initializer=last_init, trainable=True)(f)
 
         net_out = net_out * self.upper_bound  # element-wise product
-        model = tf.keras.Model([state_input, g_input], net_out)
-        model.summary()
+        model = tf.keras.Model([state_input, goal_input], net_out)
         tf.keras.utils.plot_model(model, to_file='actor_net.png',
                                   show_shapes=True, show_layer_names=True)
+        model.summary()
 
         return model
 
-    def train(self, states, advantages, actions, old_pi, c_loss, goals, esil_loss):
-
+    def train(self, states, advantages, actions, old_pi, critic, b, s_batch, goals, g_batch):
         with tf.GradientTape() as tape:
-
             mean = tf.squeeze(self.model([states, goals]))
+
+            # On-policy ppo loss
             std = tf.squeeze(tf.exp(self.model.logstd))
             new_pi = tfp.distributions.Normal(mean, std)
             ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
@@ -66,14 +69,16 @@ class Actor:
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
-            l_clip = - K.mean(K.minimum(p1, p2))
-            entropy = tf.reduce_mean(new_pi.entropy())
+            ppo_loss = K.mean(K.minimum(p1, p2))
 
-            ppo_loss = l_clip - c_loss + self.entropy_coeff * entropy
+            # Off-policy loss
+            mean_off = self.model([s_batch, g_batch])
+            q_values = critic.model([s_batch, mean_off])
+            sum_q_values = K.sum(K.mean(q_values))
+            off_loss = ((b / len(s_batch)) * sum_q_values)
 
-            ppo_loss *= 1  # ppo alpha
-
-            actor_loss = ppo_loss + esil_loss
+            actor_loss = -tf.reduce_sum(ppo_loss + off_loss)
+            # actor_loss = -ppo_loss
             actor_weights = self.model.trainable_variables
 
         # outside gradient tape
@@ -82,8 +87,8 @@ class Actor:
 
         return actor_loss.numpy()
 
-    def __call__(self, state, goal):
-        mean = tf.squeeze(self.model([state, goal]))
+    def __call__(self, state):
+        mean = tf.squeeze(self.model(state))
         std = tf.squeeze(tf.exp(self.model.logstd))
         return mean, std  # returns tensors
 
@@ -94,7 +99,83 @@ class Actor:
         self.model.load_weights(filename)
 
 
-class Critic:
+class DDPGCritic:
+    def __init__(self, state_size, action_size,
+                 replacement,
+                 learning_rate,
+                 gamma, feature_model):
+        print("Initialising Critic network")
+        self.state_size = state_size  # shape: (w, h, c)
+        self.action_size = action_size  # shape: (n, )
+        self.lr = learning_rate
+        self.gamma = gamma
+        self.replacement = replacement
+        self.train_step_count = 0
+
+        # Create NN models
+        self.feature_model = feature_model
+        self.model = self.build_net()
+        self.target = self.build_net()
+        self.optimizer = tf.keras.optimizers.Adam(self.lr)
+
+    def build_net(self):
+        state_input = layers.Input(shape=self.state_size)
+
+        feature = self.feature_model(state_input)
+        state_out = layers.Dense(32, activation="relu")(feature)
+        state_out = layers.Dense(32, activation="relu")(state_out)
+
+        # Action as input
+        action_input = layers.Input(shape=self.action_size)
+        action_out = layers.Dense(32, activation="relu")(action_input)
+
+        # Both are passed through separate layer before concatenating
+        concat = layers.Concatenate()([state_out, action_out])
+
+        out = layers.Dense(128, activation="relu")(concat)
+        out = layers.Dense(64, activation="relu")(out)  # leakyRelu
+        # out = layers.Dense(64, activation=tf.keras.layers.LeakyReLU())(out)  # leakyRelu
+
+        net_out = layers.Dense(1)(out)
+
+        # Outputs single value for give state-action
+        model = tf.keras.Model(inputs=[state_input, action_input], outputs=net_out)
+        model.summary()
+        keras.utils.plot_model(model, to_file='critic_net.png',
+                               show_shapes=True, show_layer_names=True)
+        return model
+
+    def train(self, state_batch, action_batch, y):
+        self.train_step_count += 1
+        with tf.GradientTape() as tape:
+            critic_weights = self.model.trainable_variables
+            critic_value = self.model([state_batch, action_batch])
+            critic_loss = tf.math.reduce_mean(tf.square(y - critic_value))
+
+        critic_grad = tape.gradient(critic_loss, critic_weights)
+        self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
+        return critic_loss
+
+    def update_target(self):
+        if self.replacement['name'] == 'hard':
+            if self.train_step_count % \
+                    self.replacement['rep_iter_a'] == 0:
+                self.target.set_weights(self.model.get_weights())
+        else:
+            w = np.array(self.model.get_weights(), dtype=object)
+            w_dash = np.array(self.target.get_weights(), dtype=object)
+            new_wts = self.replacement['tau'] * w + \
+                      (1 - self.replacement['tau']) * w_dash
+            self.target.set_weights(new_wts)
+
+    def save_weights(self, filename):
+        self.model.save_weights(filename)
+
+    def load_weights(self, filename):
+        self.model.load_weights(filename)
+
+
+class Baseline:
     def __init__(self, input_shape, action_space, lr, feature):
         self.state_size = input_shape
         self.action_size = action_space
@@ -106,29 +187,25 @@ class Critic:
     def build_net(self):
         # state input is a stack of 1-D YUV images
         state_input = tf.keras.layers.Input(shape=self.state_size)
-        g_input = tf.keras.layers.Input(shape=self.state_size)
-
-        feature = self.feature_model([state_input, g_input])
-
+        feature = self.feature_model(state_input)
         out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
         # Outputs single value for a given state = V(s)
-        model = tf.keras.Model(inputs=[state_input, g_input], outputs=net_out)
-        model.summary()
+        model = tf.keras.Model(inputs=state_input, outputs=net_out)
         tf.keras.utils.plot_model(model, to_file='critic_net.png',
                                   show_shapes=True, show_layer_names=True)
+        model.summary()
 
         return model
 
-    def train(self, states, returns, goals, esil_loss):
+    def train(self, states, returns):
         with tf.GradientTape() as tape:
             critic_weights = self.model.trainable_variables
-            critic_value = tf.squeeze(self.model([states, goals]))
-            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_value))
-            critic_loss += esil_loss
+            critic_values = self.model(states)
+            critic_loss = tf.math.reduce_mean(tf.square(returns - critic_values))
 
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
@@ -141,7 +218,7 @@ class Critic:
         self.model.load_weights(filename)
 
 
-class PPOESILAgent:
+class IPGHERAgent:
     def __init__(self, env, SEASONS, success_value, lr_a, lr_c, epochs,
                  training_batch, batch_size, epsilon, gamma, lmbda, use_attention):
         self.env = env
@@ -162,40 +239,41 @@ class PPOESILAgent:
         self.lmbda = lmbda
         self.use_attention = use_attention
 
-        self.shuffle = True
+        self.buffer = HERBuffer(100000, self.batch_size)
+        replacement = [
+            dict(name='soft', tau=0.005),
+            dict(name='hard', rep_iter_a=600, rep_iter_c=500)
+        ][0]
 
         # Create Actor-Critic network models
         if self.use_attention:
-            self.feature = ESILAttentionNetwork(self.state_size)
+            self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
         else:
-            # self.feature = BasicFeatureNetwork(self.state_size)
-            self.feature = ESILFeatureNetwork(self.state_size)
+            self.feature = FeatureNetwork(self.state_size, lr_a)
 
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
                            epsilon=self.epsilon, feature=self.feature)
-        self.critic = Critic(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_c,
-                             feature=self.feature)
-
-        # do not change below
-        self.log_std = -0.5 * np.ones(self.action_size, dtype=np.float32)
-        self.std = np.exp(self.log_std)
+        self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size, replacement=replacement,
+                                 learning_rate=self.lr_c, gamma=self.gamma, feature_model=self.feature)
+        self.baseline = Baseline(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_c,
+                                 feature=self.feature)
 
     def policy(self, state, goal):
         tf_state = tf.expand_dims(tf.convert_to_tensor(state), 0)
         tf_goal = tf.expand_dims(tf.convert_to_tensor(goal), 0)
 
-        mean, std = self.actor(tf_state, tf_goal)
+        mean, std = self.actor([tf_state, tf_goal])
 
         action = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
         action = np.clip(action, -self.upper_bound, self.upper_bound)
 
         return action
 
-    def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch, g_batch):
+    def compute_advantages(self, r_batch, s_batch, ns_batch, d_batch):
         gamma = self.gamma
         lmbda = self.lmbda
-        s_values = tf.squeeze(self.critic.model([s_batch, g_batch]))  # input: tensor
-        ns_values = tf.squeeze(self.critic.model([ns_batch, g_batch]))
+        s_values = tf.squeeze(self.baseline.model(s_batch))  # input: tensor
+        ns_values = tf.squeeze(self.baseline.model(ns_batch))
         returns = []
         gae = 0  # generalized advantage estimate
         for i in reversed(range(len(r_batch))):
@@ -204,31 +282,35 @@ class PPOESILAgent:
             returns.insert(0, gae + s_values[i])
 
         returns = np.array(returns)
-        adv = returns - s_values.numpy()
+        adv = returns - s_values.numpy()  # Q - V
         adv = (adv - np.mean(adv)) / (np.std(adv) + 1e-10)  # output: numpy array
         return adv, returns
 
-    def compute_esil_loss(self, states, hind_goals, hind_returns, returns, a_split, n_samples):
+    def compute_targets(self, r_batch, ns_batch, d_batch, g_batch):
+        mean = self.actor.model([ns_batch, g_batch])
 
-        # current hindsight policy
-        hind_mean, hind_std = self.actor(states, hind_goals)
-        hind_pi = tfp.distributions.Normal(hind_mean, hind_std)
+        target_critic = self.critic.model([ns_batch, mean])
+        y = r_batch + self.gamma * (1 - d_batch) * target_critic
+        return y
 
-        masks = np.asarray((hind_returns > returns), dtype=np.float32)
-        num_clone_samples = np.sum(masks)
-        tf_masks = tf.convert_to_tensor(masks, dtype=tf.float32)
-        masks_stack = tf.stack([tf_masks, tf_masks, tf_masks], axis=1)
-        log_prob_clone = hind_pi.log_prob(tf.squeeze(a_split))
-        num_clone_samples = np.max([num_clone_samples, 1])
-        esil_loss = -np.sum(log_prob_clone * masks_stack) / (3 * num_clone_samples)
-        esil_loss *= (num_clone_samples / n_samples)  # esil beta
-        return esil_loss
+    def compute_adv_bar(self, s_batch, a_batch, g_batch):
+        mean = self.actor.model([s_batch, g_batch])
+        # std = tf.exp(self.actor.model.logstd)
 
-    def replay(self, states, actions, rewards, dones, next_states,
-               goals, hind_rewards, hind_goals):
+        # actions = mean + np.random.uniform(-self.upper_bound, self.upper_bound, size=mean.shape) * std
+        # actions = np.clip(actions, -self.upper_bound, self.upper_bound)
+        x = tf.squeeze(a_batch) - tf.squeeze(mean)
+        y = tf.squeeze(self.critic.model([s_batch, mean]))
+        adv_bar = y * x
+        return adv_bar
+
+    def replay(self, states, actions, rewards, dones, next_states, goals):
+
+        a_loss_list = []
+        c_loss_list = []
+        # v_loss_list = []
 
         n_split = len(rewards) // self.batch_size
-        n_samples = n_split * self.batch_size
 
         states = tf.convert_to_tensor(states, dtype=tf.float32)
         actions = tf.convert_to_tensor(actions, dtype=tf.float32)
@@ -237,44 +319,57 @@ class PPOESILAgent:
         next_states = tf.convert_to_tensor(next_states, dtype=tf.float32)
         goals = tf.convert_to_tensor(goals, dtype=tf.float32)
 
-        hind_rewards = tf.convert_to_tensor(hind_rewards, dtype=tf.float32)
-        hind_goals = tf.convert_to_tensor(hind_goals, dtype=tf.float32)
+        # Based on algorithm at https://arxiv.org/pdf/1706.00387.pdf
 
-        advantages, target = self.compute_advantages(rewards, states, next_states, dones, goals)
-        _, hind_target = self.compute_advantages(hind_rewards, states, next_states, dones, hind_goals)
+        # Fit baseline using collected experience and compute advantages
+        # Update baseline
+        advantages, returns = self.compute_advantages(rewards, states, next_states, dones)
+
+        # If use control variate: Compute Critic-based advantages
+        # and compute learning signal
+        use_CV = False
+        v = 0.2
+        if use_CV:
+            # Compute critic-based advantage
+            adv_bar = self.compute_adv_bar(states, actions, goals)
+            ls = advantages - adv_bar
+            b = 1
+        else:
+            ls = advantages
+            b = v
+
+        ls *= (1 - v)
 
         s_split = tf.split(states, n_split)
         a_split = tf.split(actions, n_split)
-        t_split = tf.split(target, n_split)
+        t_split = tf.split(returns, n_split)
         adv_split = tf.split(advantages, n_split)
+        ls_split = tf.split(ls, n_split)
         g_split = tf.split(goals, n_split)
-        hind_t_split = tf.split(hind_target, n_split)
-        hind_g_split = tf.split(hind_goals, n_split)
         indexes = np.arange(n_split, dtype=int)
 
         # current policy
-        mean, std = self.actor(states, goals)
+        mean, std = self.actor([states, goals])
         pi = tfp.distributions.Normal(mean, std)
 
-        a_loss_list = []
-        c_loss_list = []
+        a_loss, c_loss = 0, 0
 
         np.random.shuffle(indexes)
         for _ in range(self.epochs):
+            s_batch, a_batch, r_batch, ns_batch, d_batch, g_batch = self.buffer.sample()
             for i in indexes:
                 old_pi = pi[i * self.batch_size: (i + 1) * self.batch_size]
-
-                # Calculate esil loss
-                esil_loss = self.compute_esil_loss(s_split[i], hind_g_split[i], hind_t_split[i], t_split[i], a_split[i],
-                                                   len(s_split[i]))
-
-                # Update critic
-                c_loss = self.critic.train(s_split[i], t_split[i], g_split[i], esil_loss)
-                c_loss_list.append(c_loss)
-                c_loss -= esil_loss  # Subtract esil loss so it is not added twice in actor update
                 # Update actor
-                a_loss = self.actor.train(s_split[i], adv_split[i], a_split[i], old_pi, c_loss, g_split[i], esil_loss)
+                a_loss = self.actor.train(s_split[i], ls_split[i], a_split[i], old_pi, self.critic, b, s_batch,
+                                          g_split[i], g_batch)
                 a_loss_list.append(a_loss)
+                # Update baseline
+                v_loss = self.baseline.train(s_split[i], t_split[i])
+
+            # Update critic
+            y = self.compute_targets(r_batch, ns_batch, d_batch, g_batch)
+            c_loss = self.critic.train(s_batch, a_batch, y)
+            c_loss_list.append(c_loss)
 
         self.replay_count += 1
 
@@ -285,10 +380,18 @@ class PPOESILAgent:
 
         ep_reward_list = []
         for ep in range(max_eps):
-            g = env.reset()
+            # Initialise random desired goal and state
+            g = self.env.reset()
+            state = self.env.reset()
+            # steps = random.randint(0, 7)
+            # g = state
+            # for _ in range(steps):
+            #     g, _, _, _ = self.env.step(self.env.action_space.sample())
             g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-            obsv = env.reset()
-            state = np.asarray(obsv, dtype=np.float32) / 255.0  # convert into float array
+            # self.env.state = state
+            # state = self.env.reset()
+            state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+
             t = 0
             ep_reward = 0
             while True:
@@ -316,23 +419,24 @@ class PPOESILAgent:
             train_log_dir = 'logs/train/' + current_time
             train_summary_writer = tf.summary.create_file_writer(train_log_dir)
         ############################
-
         path = './'
 
-        filename = path + str(self.use_attention) + 'result_ppo_esil.txt'
+        filename = path + str(self.use_attention) + 'result_ipg_her.txt'
         if os.path.exists(filename):
             os.remove(filename)
         else:
             print('The file does not exist. It will be created.')
 
-        # Initialise random desired goal
+        # Initialise random desired goal and state
         g = self.env.reset()
-        steps = random.randint(0, 7)
-        for _ in range(steps):
-            g, _, _, _ = self.env.step(self.env.action_space.sample())
-        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-
         state = self.env.reset()
+        # steps = random.randint(0, 7)
+        # g = state
+        # for _ in range(steps):
+        #     g, _, _, _ = self.env.step(self.env.action_space.sample())
+        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+        # state = self.env.reset()
+        # self.env.state = state
         state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
 
         done, score = False, 0
@@ -340,13 +444,12 @@ class PPOESILAgent:
         val_score = -np.inf
         val_scores = deque(maxlen=50)
         s = 0
-        s_scores = deque(maxlen=50)  # Last 50 season scores
+        s_scores = deque(maxlen=50)  # Last n season scores
         while True:
             # Instantiate or reset games memory
-            count = 0
             s_score = 0
             states, next_states, actions, rewards, dones, goals = [], [], [], [], [], []
-            hind_rewards, hind_goals = [], []
+            ep_exp = []
             for t in range(self.training_batch):  # self.training_batch
                 action = self.policy(state, g)
                 next_state, reward, done, _ = self.env.step(action)
@@ -358,36 +461,48 @@ class PPOESILAgent:
                 rewards.append(reward)
                 dones.append(done)
                 goals.append(g)
-                count += 1
+                self.buffer.record(state, action, reward, next_state, done, g)
+                ep_exp.append([state, action, reward, next_state, done, g])
 
                 state = next_state
                 score += reward
                 s_score += reward
 
                 if done:
-                    # Collect hindsight experience
-                    for i in range(count):
-                        # Achieved goal is the final state of the episode
-                        hind_goals.append(state)
-                        hind_rewards.append(1) if dones[i] else hind_rewards.append(0)
-                    count = 0
+
+                    # Add hindsight experience to buffer
+                    hind_goal = ep_exp[-1][3]  # Final state strategy
+                    # For each step of the finished episode
+                    for i in range(len(ep_exp)):
+                        # Remove k loop for final state strategy
+                        # for k in range(K):
+                        # future = np.random.randint(t, len(ep_exp))  # Future strategy
+                        # hind_goal = ep_exp[future][3]
+                        state = ep_exp[i][0]
+                        action = ep_exp[i][1]
+                        next_state = ep_exp[i][3]
+                        done = np.array_equal(next_state, hind_goal)
+                        hind_reward = 1 if done else 0
+                        self.buffer.record(state, action, hind_reward, next_state, done, hind_goal)
+
+                    ep_exp = []
 
                     self.episode += 1
                     g = self.env.reset()
-                    steps = random.randint(0, 7)
-                    for _ in range(steps):
-                        g, _, _, _ = self.env.step(self.env.action_space.sample())
-                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
                     state, done, score = self.env.reset(), False, 0
+                    # g = state
+                    # steps = random.randint(0, 7)
+                    # for _ in range(steps):
+                    #     g, _, _, _ = self.env.step(self.env.action_space.sample())
+                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+                    # self.env.state = state
                     state = np.asarray(state, dtype=np.float32) / 255.0
 
-            # Fill in left over space
-            for i in range(len(states) - len(hind_rewards)):
-                hind_goals.append(state)
-                hind_rewards.append(1) if dones[-i] else hind_rewards.append(0)
+            a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states, goals)
 
-            a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states,
-                                         goals, hind_rewards, hind_goals)
+            # Decay variables
+            # self.actor.epsilon *= 0.999
+            # self.actor.entropy_coeff *= 0.998
 
             # After season
             success_rate = s_score / sum(dones)
@@ -404,7 +519,8 @@ class PPOESILAgent:
                 val_score = self.validate(self.env)
                 val_scores.append(val_score)
                 mean_val_score = np.mean(val_scores)
-                print("Season: {}, Validation score: {}, Mean Validation score: {}".format(s, val_score, mean_val_score))
+                print(
+                    "Season: {}, Validation score: {}, Mean Validation score: {}".format(s, val_score, mean_val_score))
 
             if TB_LOG:  # tensorboard logging
                 with train_summary_writer.as_default():

@@ -1,4 +1,4 @@
-""" main for running ppo agents """
+""" main for running ppo and ipg agents """
 
 # Imports
 import tensorflow as tf
@@ -7,7 +7,9 @@ from packaging import version
 
 # Local imports
 from ppo_agent import PPOAgent
-from ppo_esil import PPOESILAgent
+from ipg_agent import IPGAgent
+from ipg_her_agent import IPGHERAgent
+# from ppo_esil import PPOESILAgent
 
 if __name__ == "__main__":
 
@@ -40,14 +42,14 @@ if __name__ == "__main__":
     print('Found GPU at: {}'.format(device_name))
 
     # #### Hyper-parameters
-    SEASONS = 100
+    SEASONS = 35
     success_value = 70
     lr_a = 0.0002  # 0.001
     lr_c = 0.0002  # 0.001
     epochs = 10
     training_batch = 1024  # 512
     batch_size = 128
-    epsilon = 0.07  # 0.2
+    epsilon = 0.2  # 0.07
     gamma = 0.993  # 0.99
     lmbda = 0.7  # 0.9
 
@@ -59,10 +61,17 @@ if __name__ == "__main__":
                                removeHeightHack=False)
 
     # PPO Agent
-    # agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+                     lmbda, use_attention)
+    # IPG Agent
+    # agent = IPGAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
     #                  lmbda, use_attention)
-    # ESIL Agent
-    agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-                         lmbda, use_attention)
+    # IPG HER Agent
+    # agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    #                     lmbda, use_attention)
+
+    # ESIL Agent (not used)
+    # agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    #                      lmbda, use_attention)
 
     agent.run()  # train as PPO

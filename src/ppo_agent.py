@@ -8,7 +8,7 @@ import os
 import datetime
 
 # Local Imports
-from feature import FeatureNetwork, AttentionFeatureNetwork, AttFeatureNetwork
+from feature import FeatureNetwork, AttentionFeatureNetwork
 
 
 class Actor:
