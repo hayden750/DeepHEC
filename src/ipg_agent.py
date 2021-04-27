@@ -453,7 +453,7 @@ class IPGAgent:
             s_scores.append(s_score)
             mean_s_score = np.mean(s_scores)
             if mean_s_score > best_score:
-                self.save_model(path, 'actor_weights.h5', 'critic_weights.h5')
+                self.save_model(path, 'actor_weights.h5', 'critic_weights.h5', 'baseline_weights.h5')
                 print("Season ", s)
                 print("Updated best score {}->{}, Model saved!".format(best_score, mean_s_score))
                 best_score = mean_s_score
@@ -487,14 +487,18 @@ class IPGAgent:
 
         self.env.close()
 
-    def save_model(self, path, actor_filename, critic_filename):
+    def save_model(self, path, actor_filename, critic_filename, baseline_filename):
         actor_file = path + actor_filename
         critic_file = path + critic_filename
+        baseline_file = path + baseline_filename
         self.actor.save_weights(actor_file)
         self.critic.save_weights(critic_file)
+        self.baseline.save_weights(baseline_file)
 
-    def load_model(self, path, actor_filename, critic_filename):
+    def load_model(self, path, actor_filename, critic_filename, baseline_filename):
         actor_file = path + actor_filename
         critic_file = path + critic_filename
+        baseline_file = path + baseline_filename
         self.actor.model.load_weights(actor_file)
         self.critic.model.load_weights(critic_file)
+        self.baseline.model.load_weights(baseline_file)

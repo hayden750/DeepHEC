@@ -53,7 +53,7 @@ if __name__ == "__main__":
     gamma = 0.993  # 0.99
     lmbda = 0.7  # 0.9
 
-    use_attention = True  # enable/disable for attention model
+    use_attention = False  # enable/disable for attention model
 
     env = KukaDiverseObjectEnv(renders=False,
                                isDiscrete=False,
@@ -61,14 +61,14 @@ if __name__ == "__main__":
                                removeHeightHack=False)
 
     # PPO Agent
-    agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-                     lmbda, use_attention)
+    # agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    #                  lmbda, use_attention)
     # IPG Agent
     # agent = IPGAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
     #                  lmbda, use_attention)
     # IPG HER Agent
-    # agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                     lmbda, use_attention)
+    agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+                        lmbda, use_attention)
 
     # ESIL Agent (not used)
     # agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
