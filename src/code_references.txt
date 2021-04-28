@@ -1,0 +1,5 @@
+Links to relevant pages code has been influenced from.
+
+PPO : https://github.com/pythonlessons/Reinforcement_Learning
+IPG : https://github.com/jianing-sun/Interpolated-Policy-Gradient-with-PPO-for-Robotics-Control-
+HER : https://github.com/kwea123/hindsight_experience_replay
