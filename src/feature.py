@@ -135,7 +135,7 @@ class AttentionFeatureNetwork:
 
         # x = layers.MultiHeadAttention(num_heads=2, key_dim=36)(x, x)        # does not work well
 
-        x = layers.Attention()([x, x])
+        # x = layers.Attention()([x, x])
 
         x = layers.LayerNormalization(epsilon=1e-6)(x)
         x = layers.Flatten()(x)
