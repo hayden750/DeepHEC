@@ -100,11 +100,13 @@ class AttentionFeatureNetwork:
                               padding="SAME", activation="relu")(img_input)
 
         # First attention layer
-        # Bahdanau + sig activation and multiply
-        attn1 = layers.AdditiveAttention()([x, x])
-        attn1 = tf.keras.activations.sigmoid(attn1)
+        # Bahdanau
+        x = layers.AdditiveAttention()([x, x])
+        # + sig activation and multiply
+        # attn1 = layers.AdditiveAttention()([x, x])
+        # attn1 = tf.keras.activations.sigmoid(attn1)
         # x = layers.Add()([attn1, x])
-        x = layers.Multiply()([attn1, x])
+        # x = layers.Multiply()([attn1, x])
 
         # Luong-style
         # x = layers.Attention()([x, x])
@@ -114,10 +116,11 @@ class AttentionFeatureNetwork:
                               padding="SAME", activation="relu")(x)
 
         # Second attention layer
-        attn2 = layers.AdditiveAttention()([x, x])
-        attn2 = tf.keras.activations.sigmoid(attn2)
+        x = layers.AdditiveAttention()([x, x])
+        # attn2 = layers.AdditiveAttention()([x, x])
+        # attn2 = tf.keras.activations.sigmoid(attn2)
         # x = layers.Add()([attn2, x])
-        x = layers.Multiply()([attn2, x])
+        # x = layers.Multiply()([attn2, x])
 
         # x = layers.Attention()([x, x])
 
@@ -128,9 +131,10 @@ class AttentionFeatureNetwork:
         # bn3 = layers.BatchNormalization()(conv3)
 
         # Third attention layer
-        attn3 = layers.AdditiveAttention()([x, x])
-        attn3 = tf.keras.activations.sigmoid(attn3)
-        x = layers.Multiply()([attn3, x])
+        x = layers.AdditiveAttention()([x, x])
+        # attn3 = layers.AdditiveAttention()([x, x])
+        # attn3 = tf.keras.activations.sigmoid(attn3)
+        # x = layers.Multiply()([attn3, x])
         # x = layers.Add()([attn3, x])
 
         # x = layers.MultiHeadAttention(num_heads=2, key_dim=36)(x, x)        # does not work well
