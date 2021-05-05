@@ -79,6 +79,7 @@ def save_and_display_gradcam(img_array, heatmap, cam_path="cam.jpg", alpha=0.4):
     superimposed_img = keras.preprocessing.image.array_to_img(superimposed_img)
 
     # save the superimposed image
+    print(cam_path)
     keras.preprocessing.image.save_img(cam_path, superimposed_img)
 
     # plt.figure(4)

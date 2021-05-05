@@ -97,7 +97,6 @@ class Actor:
 
 class DDPGCritic:
     def __init__(self, state_size, action_size,
-                 replacement,
                  learning_rate,
                  gamma, feature_model):
         print("Initialising Critic network")
@@ -105,13 +104,11 @@ class DDPGCritic:
         self.action_size = action_size  # shape: (n, )
         self.lr = learning_rate
         self.gamma = gamma
-        self.replacement = replacement
         self.train_step_count = 0
 
         # Create NN models
         self.feature_model = feature_model
         self.model = self.build_net()
-        self.target = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
     def build_net(self):
@@ -151,18 +148,6 @@ class DDPGCritic:
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
         return critic_loss
-
-    def update_target(self):
-        if self.replacement['name'] == 'hard':
-            if self.train_step_count % \
-                    self.replacement['rep_iter_a'] == 0:
-                self.target.set_weights(self.model.get_weights())
-        else:
-            w = np.array(self.model.get_weights(), dtype=object)
-            w_dash = np.array(self.target.get_weights(), dtype=object)
-            new_wts = self.replacement['tau'] * w + \
-                      (1 - self.replacement['tau']) * w_dash
-            self.target.set_weights(new_wts)
 
     def save_weights(self, filename):
         self.model.save_weights(filename)
@@ -236,20 +221,16 @@ class IPGAgent:
         self.use_attention = use_attention
 
         self.buffer = Buffer(100000, self.batch_size)
-        replacement = [
-            dict(name='soft', tau=0.005),
-            dict(name='hard', rep_iter_a=600, rep_iter_c=500)
-        ][0]
 
         # Create Actor-Critic network models
         if self.use_attention:
-            self.feature = AttentionFeatureNetwork(self.state_size, lr_a)  # TODO add attention network
+            self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
         else:
             self.feature = FeatureNetwork(self.state_size, lr_a)
 
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
                            epsilon=self.epsilon, feature=self.feature)
-        self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size, replacement=replacement,
+        self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size,
                                  learning_rate=self.lr_c, gamma=self.gamma, feature_model=self.feature)
         self.baseline = Baseline(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_c,
                                  feature=self.feature)

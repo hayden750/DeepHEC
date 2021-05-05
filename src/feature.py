@@ -99,37 +99,44 @@ class AttentionFeatureNetwork:
         x = layers.Conv2D(16, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(img_input)
 
-        #attn1 = layers.AdditiveAttention()([x, x])      # Bahdanau-style
-        x = layers.Attention()([x, x])             # Luong-style
-        # x = layers.AdditiveAttention()([x, x])
-        #attn1 = tf.keras.activations.sigmoid(attn1)
-        #x = layers.Add()([attn1, x])
-        # x = layers.Multiply()([attn1, x])
+        # First attention layer
+        # Bahdanau + sig activation and multiply
+        attn1 = layers.AdditiveAttention()([x, x])
+        attn1 = tf.keras.activations.sigmoid(attn1)
+        # x = layers.Add()([attn1, x])
+        x = layers.Multiply()([attn1, x])
+
+        # Luong-style
+        # x = layers.Attention()([x, x])
+
         x = layers.MaxPooling2D(pool_size=(2, 2))(x)
         x = layers.Conv2D(32, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(x)
 
-        x = layers.Attention()([x, x])
-        #x = layers.AdditiveAttention()([x, x])     # Bahdanau-style
-        #attn2 = layers.AdditiveAttention()([x, x])
-        #attn2 = layers.Attention()([x, x])         # Luong-style
-        #attn2 = tf.keras.activations.sigmoid(attn2)
-        #x = layers.Add()([attn2, x])
-        #x = layers.Multiply()([attn2, x])
+        # Second attention layer
+        attn2 = layers.AdditiveAttention()([x, x])
+        attn2 = tf.keras.activations.sigmoid(attn2)
+        # x = layers.Add()([attn2, x])
+        x = layers.Multiply()([attn2, x])
+
+        # x = layers.Attention()([x, x])
+
         # x = layers.BatchNormalization()(x)
         x = layers.MaxPooling2D(pool_size=(2, 2))(x)
         x = layers.Conv2D(64, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(x)
         # bn3 = layers.BatchNormalization()(conv3)
-        # include attention layer
-        #x = layers.MultiHeadAttention(num_heads=2, key_dim=36)(x, x)        # does not work well
-        #attn3 = layers.Attention()([x, x])
+
+        # Third attention layer
+        attn3 = layers.AdditiveAttention()([x, x])
+        attn3 = tf.keras.activations.sigmoid(attn3)
+        x = layers.Multiply()([attn3, x])
+        # x = layers.Add()([attn3, x])
+
+        # x = layers.MultiHeadAttention(num_heads=2, key_dim=36)(x, x)        # does not work well
+
         x = layers.Attention()([x, x])
-        # x = layers.AdditiveAttention()([x, x])
-        #attn3 = layers.AdditiveAttention()([x, x])
-        #attn3 = tf.keras.activations.sigmoid(attn3)
-        #x = layers.Multiply()([attn3, x])
-        #x = layers.Add()([attn3, x])
+
         x = layers.LayerNormalization(epsilon=1e-6)(x)
         x = layers.Flatten()(x)
         x = layers.Dense(128, activation="relu")(x)

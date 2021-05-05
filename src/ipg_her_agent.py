@@ -9,6 +9,8 @@ from collections import deque
 import os
 import datetime
 import random
+import matplotlib.pyplot as plt
+from grad_cam import make_gradcam_heatmap, save_and_display_gradcam, grad_cam2
 
 # Local Imports
 from feature import FeatureNetwork, AttentionFeatureNetwork
@@ -101,7 +103,6 @@ class Actor:
 
 class DDPGCritic:
     def __init__(self, state_size, action_size,
-                 replacement,
                  learning_rate,
                  gamma, feature_model):
         print("Initialising Critic network")
@@ -109,13 +110,11 @@ class DDPGCritic:
         self.action_size = action_size  # shape: (n, )
         self.lr = learning_rate
         self.gamma = gamma
-        self.replacement = replacement
         self.train_step_count = 0
 
         # Create NN models
         self.feature_model = feature_model
         self.model = self.build_net()
-        self.target = self.build_net()
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
     def build_net(self):
@@ -155,18 +154,6 @@ class DDPGCritic:
         critic_grad = tape.gradient(critic_loss, critic_weights)
         self.optimizer.apply_gradients(zip(critic_grad, critic_weights))
         return critic_loss
-
-    def update_target(self):
-        if self.replacement['name'] == 'hard':
-            if self.train_step_count % \
-                    self.replacement['rep_iter_a'] == 0:
-                self.target.set_weights(self.model.get_weights())
-        else:
-            w = np.array(self.model.get_weights(), dtype=object)
-            w_dash = np.array(self.target.get_weights(), dtype=object)
-            new_wts = self.replacement['tau'] * w + \
-                      (1 - self.replacement['tau']) * w_dash
-            self.target.set_weights(new_wts)
 
     def save_weights(self, filename):
         self.model.save_weights(filename)
@@ -240,10 +227,6 @@ class IPGHERAgent:
         self.use_attention = use_attention
 
         self.buffer = HERBuffer(100000, self.batch_size)
-        replacement = [
-            dict(name='soft', tau=0.005),
-            dict(name='hard', rep_iter_a=600, rep_iter_c=500)
-        ][0]
 
         # Create Actor-Critic network models
         if self.use_attention:
@@ -253,7 +236,7 @@ class IPGHERAgent:
 
         self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
                            epsilon=self.epsilon, feature=self.feature)
-        self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size, replacement=replacement,
+        self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size,
                                  learning_rate=self.lr_c, gamma=self.gamma, feature_model=self.feature)
         self.baseline = Baseline(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_c,
                                  feature=self.feature)
@@ -412,7 +395,7 @@ class IPGHERAgent:
 
         #####################
         # TENSORBOARD SETTINGS
-        TB_LOG = True  # enable / disable tensorboard logging
+        TB_LOG = False # enable / disable tensorboard logging
 
         if TB_LOG:
             current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -559,3 +542,47 @@ class IPGHERAgent:
         self.actor.model.load_weights(actor_file)
         self.critic.model.load_weights(critic_file)
         self.baseline.model.load_weights(baseline_file)
+
+    def visualise_attention(self):
+
+        g = self.env.reset()
+        state = self.env.reset()
+        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+        done, score = False, 0
+
+        while True:
+            # Instantiate or reset games memory
+            for t in range(32):  # self.training_batch
+                action = self.policy(state, g)
+                next_state, reward, done, _ = self.env.step(action)
+
+                # generate heatmap
+                # heatmap = make_gradcam_heatmap(state, agent.feature.model, 'multiply_2')
+                heatmap = grad_cam2(state, self.feature.model, self.actor.model, 'attention_2', 'feature_net')
+                new_img_array = save_and_display_gradcam(state, heatmap,
+                                                         cam_path='./gradcam/cam_l2_{}_{}.jpg'.format(e, t))
+                fig, axes = plt.subplots(2, 2)
+                axes[0][0].imshow(state)
+                axes[0][0].axis('off')
+                # axes[0][0].set_title('Original')
+                axes[0][1].matshow(heatmap)
+                axes[0][1].axis('off')
+                # axes[0][1].set_title('Heatmap')
+                axes[1][0].imshow(new_img_array)
+                axes[1][0].axis('off')
+                # axes[1][0].set_title('Superimposed')
+                axes[1][1].axis('off')
+                fig.tight_layout()
+                plt.savefig('./gradcam/comb_l2_{}_{}.jpg'.format(e, t))
+                plt.show()
+
+                state = next_state
+                t += 1
+
+                if done:
+                    g = self.env.reset()
+                    state, done, score = self.env.reset(), False, 0
+                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+                    state = np.asarray(state, dtype=np.float32) / 255.0
+
