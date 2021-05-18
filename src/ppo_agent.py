@@ -31,13 +31,14 @@ class Actor:
     def build_net(self):
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
-        x = tf.keras.layers.Input(shape=self.state_size)
-        state_input = x
+        state_input = tf.keras.layers.Input(shape=self.state_size)
 
-        if self.feature_model is not None:
-            x = self.feature_model(x)
+        if self.feature_model is None:
+            f = tf.keras.layers.Dense(128, activation="relu", trainable=True)(state_input)
+        else:
+            f = self.feature_model(state_input)
 
-        out = tf.keras.layers.Dense(128, activation='relu', trainable=True)(x)
+        out = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
                                         kernel_initializer=last_init, trainable=True)(out)
@@ -99,13 +100,14 @@ class Critic:
 
     def build_net(self):
         # state input is a stack of 1-D YUV images
-        x = tf.keras.layers.Input(shape=self.state_size)
-        state_input = x
+        state_input = tf.keras.layers.Input(shape=self.state_size)
 
-        if self.feature_model is not None:
-            x = self.feature_model(x)
+        if self.feature_model is None:
+            f = tf.keras.layers.Dense(128, activation="relu", trainable=True)(state_input)
+        else:
+            f = self.feature_model(state_input)
 
-        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(x)
+        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(f)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
