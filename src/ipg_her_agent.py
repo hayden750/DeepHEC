@@ -9,8 +9,6 @@ from collections import deque
 import os
 import datetime
 import random
-import matplotlib.pyplot as plt
-from grad_cam import make_gradcam_heatmap, save_and_display_gradcam, grad_cam2
 
 # Local Imports
 from feature import FeatureNetwork, AttentionFeatureNetwork
@@ -18,8 +16,9 @@ from Replay_Buffer import HERBuffer
 
 
 class Actor:
-    def __init__(self, input_shape, action_space, lr, epsilon, feature):
+    def __init__(self, input_shape, goal_shape, action_space, lr, epsilon, feature):
         self.state_size = input_shape
+        self.goal_size = goal_shape
         self.action_size = action_space
         self.lr = lr
         self.upper_bound = 1.0
@@ -38,11 +37,13 @@ class Actor:
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
         state_input = tf.keras.layers.Input(shape=self.state_size)
-        goal_input = tf.keras.layers.Input(shape=self.state_size)
+        goal_input = tf.keras.layers.Input(shape=self.goal_size)
 
-        f1 = self.feature_model(state_input)
-        f2 = self.feature_model(goal_input)
-        f = layers.Concatenate()([f1, f2])
+        if self.feature_model is not None:
+            state_input = self.feature_model(state_input)
+            goal_input = self.feature_model(goal_input)
+
+        f = layers.Concatenate()([state_input, goal_input])
 
         f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
         f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
@@ -67,7 +68,7 @@ class Actor:
             ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
                            old_pi.log_prob(tf.squeeze(actions)))
 
-            adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
+            adv_stack = tf.stack([advantages for _ in range(self.action_size)], axis=1)
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
@@ -118,10 +119,12 @@ class DDPGCritic:
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
     def build_net(self):
-        state_input = layers.Input(shape=self.state_size)
+        x = layers.Input(shape=self.state_size)  # State input
 
-        feature = self.feature_model(state_input)
-        state_out = layers.Dense(32, activation="relu")(feature)
+        if self.feature_model is not None:
+            x = self.feature_model(x)
+
+        state_out = layers.Dense(32, activation="relu")(x)
         state_out = layers.Dense(32, activation="relu")(state_out)
 
         # Action as input
@@ -138,7 +141,7 @@ class DDPGCritic:
         net_out = layers.Dense(1)(out)
 
         # Outputs single value for give state-action
-        model = tf.keras.Model(inputs=[state_input, action_input], outputs=net_out)
+        model = tf.keras.Model(inputs=[x, action_input], outputs=net_out)
         model.summary()
         keras.utils.plot_model(model, to_file='critic_net.png',
                                show_shapes=True, show_layer_names=True)
@@ -173,15 +176,18 @@ class Baseline:
 
     def build_net(self):
         # state input is a stack of 1-D YUV images
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        feature = self.feature_model(state_input)
-        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
+        x = tf.keras.layers.Input(shape=self.state_size)
+
+        if self.feature_model is not None:
+            x = self.feature_model(x)
+
+        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(x)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
         # Outputs single value for a given state = V(s)
-        model = tf.keras.Model(inputs=state_input, outputs=net_out)
+        model = tf.keras.Model(inputs=x, outputs=net_out)
         tf.keras.utils.plot_model(model, to_file='critic_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()
@@ -207,10 +213,16 @@ class Baseline:
 
 class IPGHERAgent:
     def __init__(self, env, SEASONS, success_value, lr_a, lr_c, epochs,
-                 training_batch, batch_size, epsilon, gamma, lmbda, use_attention):
+                 training_batch, batch_size, epsilon, gamma, lmbda, use_attention, use_mujo):
         self.env = env
+        self.is_mujo = use_mujo
         self.action_size = self.env.action_space.shape[0]
-        self.state_size = self.env.observation_space.shape
+        if self.is_mujo:
+            self.state_size = self.env.observation_space["observation"].shape
+            self.goal_size = self.env.observation_space["desired_goal"].shape
+        else:
+            self.state_size = self.env.observation_space.shape
+            self.goal_size = self.state_size
         self.upper_bound = self.env.action_space.high
         self.SEASONS = SEASONS
         self.episode = 0
@@ -229,13 +241,15 @@ class IPGHERAgent:
         self.buffer = HERBuffer(100000, self.batch_size)
 
         # Create Actor-Critic network models
-        if self.use_attention:
+        if self.is_mujo:
+            self.feature = None
+        elif self.use_attention:
             self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
         else:
             self.feature = FeatureNetwork(self.state_size, lr_a)
 
-        self.actor = Actor(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_a,
-                           epsilon=self.epsilon, feature=self.feature)
+        self.actor = Actor(input_shape=self.state_size, goal_shape=self.goal_size, action_space=self.action_size,
+                           lr=self.lr_a, epsilon=self.epsilon, feature=self.feature)
         self.critic = DDPGCritic(state_size=self.state_size, action_size=self.action_size,
                                  learning_rate=self.lr_c, gamma=self.gamma, feature_model=self.feature)
         self.baseline = Baseline(input_shape=self.state_size, action_space=self.action_size, lr=self.lr_c,
@@ -364,23 +378,26 @@ class IPGHERAgent:
         ep_reward_list = []
         for ep in range(max_eps):
             # Initialise random desired goal and state
-            g = self.env.reset()
-            state = self.env.reset()
-            # steps = random.randint(0, 7)
-            # g = state
-            # for _ in range(steps):
-            #     g, _, _, _ = self.env.step(self.env.action_space.sample())
-            g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-            # self.env.state = state
-            # state = self.env.reset()
-            state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+            if self.is_mujo:
+                env_init = self.env.reset()
+                g = env_init["desired_goal"]
+                state = env_init["observation"]
+            else:
+                g = self.env.reset()
+                state = self.env.reset()
+                g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+                state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
 
             t = 0
             ep_reward = 0
             while True:
                 action = self.policy(state, g)
                 next_obsv, reward, done, _ = env.step(action)
-                next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0
+                if self.is_mujo:
+                    reward = 1 if reward == 0 else 0
+                    next_state = next_obsv["observation"]
+                else:
+                    next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0
                 state = next_state
                 ep_reward += reward
                 t += 1
@@ -411,16 +428,15 @@ class IPGHERAgent:
             print('The file does not exist. It will be created.')
 
         # Initialise random desired goal and state
-        g = self.env.reset()
-        state = self.env.reset()
-        # steps = random.randint(0, 7)
-        # g = state
-        # for _ in range(steps):
-        #     g, _, _, _ = self.env.step(self.env.action_space.sample())
-        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-        # state = self.env.reset()
-        # self.env.state = state
-        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+        if self.is_mujo:
+            env_init = self.env.reset()
+            g = env_init["desired_goal"]
+            state = env_init["observation"]
+        else:
+            g = self.env.reset()
+            state = self.env.reset()
+            g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+            state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
 
         done, score = False, 0
         best_score = -np.inf
@@ -436,7 +452,13 @@ class IPGHERAgent:
             for t in range(self.training_batch):  # self.training_batch
                 action = self.policy(state, g)
                 next_state, reward, done, _ = self.env.step(action)
-                next_state = np.asarray(next_state, dtype=np.float32) / 255.0
+
+                if self.is_mujo:
+                    reward = 1 if reward == 0 else 0
+                    achieved_goal = next_state["achieved_goal"]
+                    next_state = next_state["observation"]
+                else:
+                    next_state = np.asarray(next_state, dtype=np.float32) / 255.0
 
                 states.append(state)
                 next_states.append(next_state)
@@ -454,7 +476,10 @@ class IPGHERAgent:
                 if done:
 
                     # Add hindsight experience to buffer
-                    hind_goal = ep_exp[-1][3]  # Final state strategy
+                    if self.is_mujo:
+                        hind_goal = achieved_goal
+                    else:
+                        hind_goal = ep_exp[-1][3]  # Final state strategy
                     # For each step of the finished episode
                     for i in range(len(ep_exp)):
                         # Remove k loop for final state strategy
@@ -464,22 +489,25 @@ class IPGHERAgent:
                         state = ep_exp[i][0]
                         action = ep_exp[i][1]
                         next_state = ep_exp[i][3]
-                        done = np.array_equal(next_state, hind_goal)
+                        if self.is_mujo:
+                            done = np.array_equal(g, hind_goal)
+                        else:
+                            done = np.array_equal(next_state, hind_goal)
                         hind_reward = 1 if done else 0
                         self.buffer.record(state, action, hind_reward, next_state, done, hind_goal)
 
                     ep_exp = []
 
                     self.episode += 1
-                    g = self.env.reset()
-                    state, done, score = self.env.reset(), False, 0
-                    # g = state
-                    # steps = random.randint(0, 7)
-                    # for _ in range(steps):
-                    #     g, _, _, _ = self.env.step(self.env.action_space.sample())
-                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-                    # self.env.state = state
-                    state = np.asarray(state, dtype=np.float32) / 255.0
+                    if self.is_mujo:
+                        env_init = self.env.reset()
+                        g = env_init["desired_goal"]
+                        state, done, score = env_init["observation"], False, 0
+                    else:
+                        g = self.env.reset()
+                        state, done, score = self.env.reset(), False, 0
+                        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
+                        state = np.asarray(state, dtype=np.float32) / 255.0
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states, goals)
 
@@ -542,47 +570,3 @@ class IPGHERAgent:
         self.actor.model.load_weights(actor_file)
         self.critic.model.load_weights(critic_file)
         self.baseline.model.load_weights(baseline_file)
-
-    def visualise_attention(self):
-
-        g = self.env.reset()
-        state = self.env.reset()
-        g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
-        done, score = False, 0
-
-        while True:
-            # Instantiate or reset games memory
-            for t in range(32):  # self.training_batch
-                action = self.policy(state, g)
-                next_state, reward, done, _ = self.env.step(action)
-
-                # generate heatmap
-                # heatmap = make_gradcam_heatmap(state, agent.feature.model, 'multiply_2')
-                heatmap = grad_cam2(state, self.feature.model, self.actor.model, 'attention_2', 'feature_net')
-                new_img_array = save_and_display_gradcam(state, heatmap,
-                                                         cam_path='./gradcam/cam_l2_{}_{}.jpg'.format(e, t))
-                fig, axes = plt.subplots(2, 2)
-                axes[0][0].imshow(state)
-                axes[0][0].axis('off')
-                # axes[0][0].set_title('Original')
-                axes[0][1].matshow(heatmap)
-                axes[0][1].axis('off')
-                # axes[0][1].set_title('Heatmap')
-                axes[1][0].imshow(new_img_array)
-                axes[1][0].axis('off')
-                # axes[1][0].set_title('Superimposed')
-                axes[1][1].axis('off')
-                fig.tight_layout()
-                plt.savefig('./gradcam/comb_l2_{}_{}.jpg'.format(e, t))
-                plt.show()
-
-                state = next_state
-                t += 1
-
-                if done:
-                    g = self.env.reset()
-                    state, done, score = self.env.reset(), False, 0
-                    g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
-                    state = np.asarray(state, dtype=np.float32) / 255.0
-

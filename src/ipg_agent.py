@@ -35,15 +35,18 @@ class Actor:
     def build_net(self):
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        f = self.feature_model(state_input)
-        f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
-        f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
+        x = tf.keras.layers.Input(shape=self.state_size)
+
+        if self.feature_model is not None:
+            x = self.feature_model(x)
+
+        out = tf.keras.layers.Dense(128, activation='relu', trainable=True)(x)
+        out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(self.action_size, activation='tanh',
-                                        kernel_initializer=last_init, trainable=True)(f)
+                                        kernel_initializer=last_init, trainable=True)(out)
 
         net_out = net_out * self.upper_bound  # element-wise product
-        model = tf.keras.Model(state_input, net_out)
+        model = tf.keras.Model(x, net_out)
         tf.keras.utils.plot_model(model, to_file='actor_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()
@@ -61,7 +64,7 @@ class Actor:
             ratio = tf.exp(new_pi.log_prob(tf.squeeze(actions)) -
                            old_pi.log_prob(tf.squeeze(actions)))
 
-            adv_stack = tf.stack([advantages, advantages, advantages], axis=1)
+            adv_stack = tf.stack([advantages for _ in range(self.action_size)], axis=1)
 
             p1 = ratio * adv_stack
             p2 = tf.clip_by_value(ratio, 1. - self.epsilon, 1. + self.epsilon) * adv_stack
@@ -112,10 +115,12 @@ class DDPGCritic:
         self.optimizer = tf.keras.optimizers.Adam(self.lr)
 
     def build_net(self):
-        state_input = layers.Input(shape=self.state_size)
+        x = layers.Input(shape=self.state_size)  # State input
 
-        feature = self.feature_model(state_input)
-        state_out = layers.Dense(32, activation="relu")(feature)
+        if self.feature_model is not None:
+            x = self.feature_model(x)
+
+        state_out = layers.Dense(32, activation="relu")(x)
         state_out = layers.Dense(32, activation="relu")(state_out)
 
         # Action as input
@@ -132,7 +137,7 @@ class DDPGCritic:
         net_out = layers.Dense(1)(out)
 
         # Outputs single value for give state-action
-        model = tf.keras.Model(inputs=[state_input, action_input], outputs=net_out)
+        model = tf.keras.Model(inputs=[x, action_input], outputs=net_out)
         model.summary()
         keras.utils.plot_model(model, to_file='critic_net.png',
                                show_shapes=True, show_layer_names=True)
@@ -167,15 +172,18 @@ class Baseline:
 
     def build_net(self):
         # state input is a stack of 1-D YUV images
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        feature = self.feature_model(state_input)
-        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(feature)
+        x = tf.keras.layers.Input(shape=self.state_size)
+
+        if self.feature_model is not None:
+            x = self.feature_model(x)
+
+        out = tf.keras.layers.Dense(128, activation="relu", trainable=True)(x)
         out = tf.keras.layers.Dense(64, activation="relu", trainable=True)(out)
         out = tf.keras.layers.Dense(32, activation="relu", trainable=True)(out)
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
         # Outputs single value for a given state = V(s)
-        model = tf.keras.Model(inputs=state_input, outputs=net_out)
+        model = tf.keras.Model(inputs=x, outputs=net_out)
         tf.keras.utils.plot_model(model, to_file='critic_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()
@@ -201,10 +209,14 @@ class Baseline:
 
 class IPGAgent:
     def __init__(self, env, SEASONS, success_value, lr_a, lr_c, epochs,
-                 training_batch, batch_size, epsilon, gamma, lmbda, use_attention):
+                 training_batch, batch_size, epsilon, gamma, lmbda, use_attention, use_mujo):
         self.env = env
+        self.is_mujo = use_mujo
         self.action_size = self.env.action_space.shape[0]
-        self.state_size = self.env.observation_space.shape
+        if self.is_mujo:
+            self.state_size = self.env.observation_space["observation"].shape
+        else:
+            self.state_size = self.env.observation_space.shape
         self.upper_bound = self.env.action_space.high
         self.SEASONS = SEASONS
         self.episode = 0
@@ -223,7 +235,9 @@ class IPGAgent:
         self.buffer = Buffer(100000, self.batch_size)
 
         # Create Actor-Critic network models
-        if self.use_attention:
+        if self.is_mujo:
+            self.feature = None
+        elif self.use_attention:
             self.feature = AttentionFeatureNetwork(self.state_size, lr_a)
         else:
             self.feature = FeatureNetwork(self.state_size, lr_a)
@@ -353,14 +367,20 @@ class IPGAgent:
 
         ep_reward_list = []
         for ep in range(max_eps):
-            obsv = env.reset()
-            state = np.asarray(obsv, dtype=np.float32) / 255.0  # convert into float array
+            if self.is_mujo:
+                state = env.reset()["observation"]
+            else:
+                state = env.reset()
+                state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
             t = 0
             ep_reward = 0
             while True:
                 action = self.policy(state)
                 next_obsv, reward, done, _ = env.step(action)
-                next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0
+                if self.is_mujo:
+                    next_state = next_obsv["observation"]
+                else:
+                    next_state = np.asarray(next_obsv, dtype=np.float32) / 255.0
                 state = next_state
                 ep_reward += reward
                 t += 1
@@ -390,8 +410,11 @@ class IPGAgent:
         else:
             print('The file does not exist. It will be created.')
 
-        state = self.env.reset()
-        state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
+        if self.is_mujo:
+            state = self.env.reset()["observation"]
+        else:
+            state = self.env.reset()
+            state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
         done, score = False, 0
         best_score = -np.inf
         val_score = -np.inf
@@ -405,7 +428,11 @@ class IPGAgent:
             for t in range(self.training_batch):  # self.training_batch
                 action = self.policy(state)
                 next_state, reward, done, _ = self.env.step(action)
-                next_state = np.asarray(next_state, dtype=np.float32) / 255.0
+                if self.is_mujo:
+                    reward = 1 if reward == 0 else 0
+                    next_state = next_state["observation"]
+                else:
+                    next_state = np.asarray(next_state, dtype=np.float32) / 255.0
 
                 states.append(state)
                 next_states.append(next_state)
@@ -420,8 +447,11 @@ class IPGAgent:
 
                 if done:
                     self.episode += 1
-                    state, done, score = self.env.reset(), False, 0
-                    state = np.asarray(state, dtype=np.float32) / 255.0
+                    if self.is_mujo:
+                        state, done, score = self.env.reset()["observation"], False, 0
+                    else:
+                        state, done, score = self.env.reset(), False, 0
+                        state = np.asarray(state, dtype=np.float32) / 255.0
 
             a_loss, c_loss = self.replay(states, actions, rewards, dones, next_states)
 

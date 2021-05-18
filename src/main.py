@@ -4,6 +4,8 @@
 import tensorflow as tf
 from pybullet_envs.bullet.kuka_diverse_object_gym_env import KukaDiverseObjectEnv
 from packaging import version
+import gym
+import mujoco_py
 
 # Local imports
 from ppo_agent import PPOAgent
@@ -54,24 +56,27 @@ if __name__ == "__main__":
     lmbda = 0.7  # 0.9
 
     use_attention = False  # enable/disable for attention model
+    use_mujoco = True  # enable/disable for appropriate environment
 
-    env = KukaDiverseObjectEnv(renders=False,
-                               isDiscrete=False,
-                               maxSteps=20,
-                               removeHeightHack=False)
+    if use_mujoco:
+        # Mujuco Env
+        env = gym.make('FetchReach-v1')
+    else:
+        # Kukacam Env
+        env = KukaDiverseObjectEnv(renders=False,
+                                   isDiscrete=False,
+                                   maxSteps=20,
+                                   removeHeightHack=False)
+
 
     # PPO Agent
     # agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                  lmbda, use_attention)
+    #                  lmbda, use_attention, use_mujoco)
     # IPG Agent
     # agent = IPGAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                  lmbda, use_attention)
+    #                  lmbda, use_attention, use_mujoco)
     # IPG HER Agent
     agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-                        lmbda, use_attention)
+                        lmbda, use_attention, use_mujoco)
 
-    # ESIL Agent (not used)
-    # agent = PPOESILAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                      lmbda, use_attention)
-
-    agent.run()  # train as PPO
+    agent.run()

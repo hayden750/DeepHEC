@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-# from attention import SeqSelfAttention
+from attention import SeqSelfAttention
 
 
 class BasicFeatureNetwork:
@@ -101,28 +101,30 @@ class AttentionFeatureNetwork:
 
         # First attention layer
         # Bahdanau
-        x = layers.AdditiveAttention()([x, x])
+        # x = layers.AdditiveAttention()([x, x])
         # + sig activation and multiply
+        # attn1 = layers.Attention()([x, x])
         # attn1 = layers.AdditiveAttention()([x, x])
         # attn1 = tf.keras.activations.sigmoid(attn1)
         # x = layers.Add()([attn1, x])
         # x = layers.Multiply()([attn1, x])
 
         # Luong-style
-        # x = layers.Attention()([x, x])
+        x = layers.Attention()([x, x])
 
         x = layers.MaxPooling2D(pool_size=(2, 2))(x)
         x = layers.Conv2D(32, kernel_size=5, strides=2,
                               padding="SAME", activation="relu")(x)
 
         # Second attention layer
-        x = layers.AdditiveAttention()([x, x])
+        # x = layers.AdditiveAttention()([x, x])
         # attn2 = layers.AdditiveAttention()([x, x])
+        # attn2 = layers.Attention()([x, x])
         # attn2 = tf.keras.activations.sigmoid(attn2)
         # x = layers.Add()([attn2, x])
         # x = layers.Multiply()([attn2, x])
 
-        # x = layers.Attention()([x, x])
+        x = layers.Attention()([x, x])
 
         # x = layers.BatchNormalization()(x)
         x = layers.MaxPooling2D(pool_size=(2, 2))(x)
@@ -131,18 +133,26 @@ class AttentionFeatureNetwork:
         # bn3 = layers.BatchNormalization()(conv3)
 
         # Third attention layer
-        x = layers.AdditiveAttention()([x, x])
+        # x = layers.AdditiveAttention()([x, x])
         # attn3 = layers.AdditiveAttention()([x, x])
+        # attn3 = layers.Attention()([x, x])
         # attn3 = tf.keras.activations.sigmoid(attn3)
         # x = layers.Multiply()([attn3, x])
         # x = layers.Add()([attn3, x])
 
         # x = layers.MultiHeadAttention(num_heads=2, key_dim=36)(x, x)        # does not work well
 
-        # x = layers.Attention()([x, x])
+        x = layers.Attention()([x, x])
 
         x = layers.LayerNormalization(epsilon=1e-6)(x)
         x = layers.Flatten()(x)
+
+        # Sequential Attention
+        # x = layers.Reshape((8, 32))(x)
+        # x = SeqSelfAttention(units=32)(x)
+        # x = layers.Reshape((1, 256))(x)
+        # x = layers.Flatten()(x)
+
         x = layers.Dense(128, activation="relu")(x)
         x = layers.Dense(128, activation="relu")(x)
         x = layers.Dense(64, activation="relu")(x)
@@ -155,5 +165,3 @@ class AttentionFeatureNetwork:
 
     def __call__(self, state):
         return self.model(state)
-
-

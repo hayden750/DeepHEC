@@ -42,31 +42,33 @@ if __name__ == '__main__':
     action_size = env.action_space.shape[0]  # (3,)
 
     # Create a Kuka Actor-Critic Agent
-    # agent = IPGAgent(env,
-    #                  SEASONS=1,
-    #                  batch_size=128,
-    #                  epochs=10,
-    #                  use_attention=True,
-    #                  success_value=70,
-    #                  training_batch=1024,
-    #                  lr_a=2e-4,
-    #                  lr_c=2e-4,
-    #                  gamma=0.993,
-    #                  lmbda=0.7,
-    #                  epsilon=0.2)
+    agent = IPGAgent(env,
+                     SEASONS=1,
+                     batch_size=128,
+                     epochs=10,
+                     use_attention=True,
+                     success_value=70,
+                     training_batch=1024,
+                     lr_a=2e-4,
+                     lr_c=2e-4,
+                     gamma=0.993,
+                     lmbda=0.7,
+                     epsilon=0.2,
+                     use_mujo=False)
 
-    agent = IPGHERAgent(env,
-                        SEASONS=1,
-                        batch_size=128,
-                        epochs=10,
-                        use_attention=True,
-                        success_value=70,
-                        training_batch=1024,
-                        lr_a=2e-4,
-                        lr_c=2e-4,
-                        gamma=0.993,
-                        lmbda=0.7,
-                        epsilon=0.2)
+    # agent = IPGHERAgent(env,
+    #                     SEASONS=1,
+    #                     batch_size=128,
+    #                     epochs=10,
+    #                     use_attention=True,
+    #                     success_value=70,
+    #                     training_batch=1024,
+    #                     lr_a=2e-4,
+    #                     lr_c=2e-4,
+    #                     gamma=0.993,
+    #                     lmbda=0.7,
+    #                     epsilon=0.2,
+    #                     use_mujo=False)
 
     # load model weights
     agent.load_model('./', 'actor_weights.h5', 'critic_weights.h5', 'baseline_weights.h5')
@@ -81,11 +83,11 @@ if __name__ == '__main__':
         t = 0
         while not done:
             state = np.asarray(obsv, dtype=np.float32) / 255.0  # convert into float array
-            action = agent.policy(state, goal)
+            action = agent.policy(state)
             next_obsv, reward, done, _ = env.step(action)
 
             # generate heatmap
-            heatmap = make_gradcam_heatmap(state, agent.feature.model, 'multiply_2')
+            heatmap = make_gradcam_heatmap(state, agent.feature.model, 'max_pooling2d')
             #heatmap = grad_cam2(state, agent.feature.model, agent.actor.model, 'attention_2', 'feature_net')
             new_img_array = save_and_display_gradcam(state, heatmap, cam_path='./gradcam/cam_l2_{}_{}.jpg'.format(e, t))
             fig, axes = plt.subplots(2, 2)
