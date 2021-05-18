@@ -44,7 +44,7 @@ if __name__ == "__main__":
     print('Found GPU at: {}'.format(device_name))
 
     # #### Hyper-parameters
-    SEASONS = 35
+    SEASONS = 1000 # 35
     success_value = 70
     lr_a = 0.0002  # 0.001
     lr_c = 0.0002  # 0.001
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     lmbda = 0.7  # 0.9
 
     use_attention = False  # enable/disable for attention model
-    use_mujoco = True  # enable/disable for appropriate environment
+    use_mujoco = False  # enable/disable for appropriate environment
 
     if use_mujoco:
         # Mujuco Env
@@ -73,10 +73,10 @@ if __name__ == "__main__":
     # agent = PPOAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
     #                  lmbda, use_attention, use_mujoco)
     # IPG Agent
-    # agent = IPGAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-    #                  lmbda, use_attention, use_mujoco)
+    agent = IPGAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+                     lmbda, use_attention, use_mujoco)
     # IPG HER Agent
-    agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
-                        lmbda, use_attention, use_mujoco)
+    # agent = IPGHERAgent(env, SEASONS, success_value, lr_a, lr_c, epochs, training_batch, batch_size, epsilon, gamma,
+    #                     lmbda, use_attention, use_mujoco)
 
     agent.run()

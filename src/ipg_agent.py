@@ -36,6 +36,7 @@ class Actor:
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
         x = tf.keras.layers.Input(shape=self.state_size)
+        state_input = x
 
         if self.feature_model is not None:
             x = self.feature_model(x)
@@ -46,7 +47,7 @@ class Actor:
                                         kernel_initializer=last_init, trainable=True)(out)
 
         net_out = net_out * self.upper_bound  # element-wise product
-        model = tf.keras.Model(x, net_out)
+        model = tf.keras.Model(state_input, net_out)
         tf.keras.utils.plot_model(model, to_file='actor_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()
@@ -116,6 +117,7 @@ class DDPGCritic:
 
     def build_net(self):
         x = layers.Input(shape=self.state_size)  # State input
+        state_input = x
 
         if self.feature_model is not None:
             x = self.feature_model(x)
@@ -137,7 +139,7 @@ class DDPGCritic:
         net_out = layers.Dense(1)(out)
 
         # Outputs single value for give state-action
-        model = tf.keras.Model(inputs=[x, action_input], outputs=net_out)
+        model = tf.keras.Model(inputs=[state_input, action_input], outputs=net_out)
         model.summary()
         keras.utils.plot_model(model, to_file='critic_net.png',
                                show_shapes=True, show_layer_names=True)
@@ -173,6 +175,7 @@ class Baseline:
     def build_net(self):
         # state input is a stack of 1-D YUV images
         x = tf.keras.layers.Input(shape=self.state_size)
+        state_input = x
 
         if self.feature_model is not None:
             x = self.feature_model(x)
@@ -183,7 +186,7 @@ class Baseline:
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
         # Outputs single value for a given state = V(s)
-        model = tf.keras.Model(inputs=x, outputs=net_out)
+        model = tf.keras.Model(inputs=state_input, outputs=net_out)
         tf.keras.utils.plot_model(model, to_file='critic_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()

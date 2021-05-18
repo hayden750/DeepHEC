@@ -36,14 +36,16 @@ class Actor:
     def build_net(self):
         # input is a stack of 1-channel YUV images
         last_init = tf.random_uniform_initializer(minval=-0.03, maxval=0.03)
-        state_input = tf.keras.layers.Input(shape=self.state_size)
-        goal_input = tf.keras.layers.Input(shape=self.goal_size)
+        x = tf.keras.layers.Input(shape=self.state_size)
+        state_input = x
+        y = tf.keras.layers.Input(shape=self.goal_size)
+        goal_input = y
 
         if self.feature_model is not None:
-            state_input = self.feature_model(state_input)
-            goal_input = self.feature_model(goal_input)
+            x = self.feature_model(x)
+            y = self.feature_model(y)
 
-        f = layers.Concatenate()([state_input, goal_input])
+        f = layers.Concatenate()([x, y])
 
         f = tf.keras.layers.Dense(128, activation='relu', trainable=True)(f)
         f = tf.keras.layers.Dense(64, activation="relu", trainable=True)(f)
@@ -120,6 +122,7 @@ class DDPGCritic:
 
     def build_net(self):
         x = layers.Input(shape=self.state_size)  # State input
+        state_input = x
 
         if self.feature_model is not None:
             x = self.feature_model(x)
@@ -141,7 +144,7 @@ class DDPGCritic:
         net_out = layers.Dense(1)(out)
 
         # Outputs single value for give state-action
-        model = tf.keras.Model(inputs=[x, action_input], outputs=net_out)
+        model = tf.keras.Model(inputs=[state_input, action_input], outputs=net_out)
         model.summary()
         keras.utils.plot_model(model, to_file='critic_net.png',
                                show_shapes=True, show_layer_names=True)
@@ -177,6 +180,7 @@ class Baseline:
     def build_net(self):
         # state input is a stack of 1-D YUV images
         x = tf.keras.layers.Input(shape=self.state_size)
+        state_input = x
 
         if self.feature_model is not None:
             x = self.feature_model(x)
@@ -187,7 +191,7 @@ class Baseline:
         net_out = tf.keras.layers.Dense(1, trainable=True)(out)
 
         # Outputs single value for a given state = V(s)
-        model = tf.keras.Model(inputs=x, outputs=net_out)
+        model = tf.keras.Model(inputs=state_input, outputs=net_out)
         tf.keras.utils.plot_model(model, to_file='critic_net.png',
                                   show_shapes=True, show_layer_names=True)
         model.summary()
@@ -412,7 +416,7 @@ class IPGHERAgent:
 
         #####################
         # TENSORBOARD SETTINGS
-        TB_LOG = False # enable / disable tensorboard logging
+        TB_LOG = True # enable / disable tensorboard logging
 
         if TB_LOG:
             current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -433,7 +437,7 @@ class IPGHERAgent:
             g = env_init["desired_goal"]
             state = env_init["observation"]
         else:
-            g = self.env.reset()
+            g = self.env.reset()  # Takes random image state as desired goal
             state = self.env.reset()
             g = np.asarray(g, dtype=np.float32) / 255.0  # convert into float array
             state = np.asarray(state, dtype=np.float32) / 255.0  # convert into float array
